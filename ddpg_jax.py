@@ -8,6 +8,7 @@ import gym
 import copy 
 import matplotlib.pyplot as plt 
 from torch.utils.tensorboard import SummaryWriter
+import cloudpickle
 
 # from tqdm.notebook import tqdm 
 from tqdm import tqdm 
@@ -300,7 +301,10 @@ for epi_i in tqdm(range(n_episodes)):
 
     if epi_i == 0 or sum(rewards) > max_reward: 
         max_reward = sum(rewards)
-        np.savez(model_path/f'params_{max_reward:.2f}', p_params=p_params, q_params=q_params)
+        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            cloudpickle.dump((p_params, q_params), f)
+
+        # np.savez(model_path/f'params_{max_reward:.2f}', p_params=p_params, q_params=q_params)
 
 # %%
 # %%
