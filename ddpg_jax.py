@@ -136,6 +136,25 @@ def batch_critic_loss(q_params, target_params, batch):
 def batch_policy_loss(p_params, q_params, batch):
     return jax.vmap(partial(policy_loss, p_params, q_params))(batch).mean()
 
+def eval(p_params, env, name):
+    rewards = 0 
+    imgs = []
+    obs = env.reset()
+    while True: 
+        img = env.render(mode='rgb_array')
+        imgs.append(img)
+
+        a = p_frwd(p_params, obs)
+        obs2, r, done, _ = env.step(a)        
+        obs = obs2 
+        rewards += r
+        if done: break 
+
+    print(f'writing len {len(imgs)} total reward {rewards}...')
+    write_apng(f'{name}_{rewards}.png', imgs, delay=20)
+
+    return imgs, rewards
+
 #%%
 @jax.jit
 def ddpg_step(params, opt_states, batch):
@@ -242,6 +261,10 @@ q_opt_state = q_optim.init(q_params)
 params = (p_params, q_params, p_params_t, q_params_t)
 opt_states = (p_opt_state, q_opt_state)
 
+import pathlib 
+model_path = pathlib.Path(f'./models/ddpg/{env_name}')
+model_path.mkdir(exist_ok=True, parents=True)
+
 step_i = 0 
 for epi_i in tqdm(range(n_episodes)):
 
@@ -274,6 +297,10 @@ for epi_i in tqdm(range(n_episodes)):
     writer.add_scalar('rollout/length', len(rewards), epi_i)
 
     eps -= eps_decay # decay exploration 
+
+    if epi_i == 0 or sum(rewards) > max_reward: 
+        max_reward = sum(rewards)
+        np.savez(model_path/f'params_{max_reward:.2f}', p_params=p_params, q_params=q_params)
 
 # %%
 # %%
