@@ -3,6 +3,7 @@ import jax
 import jax.numpy as np 
 import numpy as onp 
 import haiku as hk
+
 import optax
 import gym 
 import copy 
@@ -27,7 +28,8 @@ config.update("jax_debug_nans", True) # break on nans
 #%%
 # env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
-env_name = 'Pendulum-v0' ## hyperparams work for this env with correct seed
+# env_name = 'Pendulum-v0' ## hyperparams work for this env with correct seed
+env_name = 'BipedalWalker-v3'
 # env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
@@ -36,6 +38,7 @@ obs_dim = env.observation_space.shape[0]
 
 a_high = env.action_space.high[0]
 a_low = env.action_space.low[0]
+assert -a_high == a_low 
 
 #%%
 class FanIn_Uniform(hk.initializers.Initializer):
@@ -92,20 +95,22 @@ class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
         self.buffer_counter = 0
-        # obs, obs2 + a, r, done
-        self.buffer = onp.zeros((buffer_capacity, 2 * obs_dim + 3))
+        # obs, obs2, a, r, done
+        self.buffer = onp.zeros((buffer_capacity, 2 * obs_dim + n_actions + 2))
 
     def push(self, sample):
         i = self.buffer_counter % self.buffer_capacity
         (obs, a, obs2, r, done) = sample
-        self.buffer[i] = onp.array([*obs, a.item(), r.item(), *obs2, float(done)])
+        self.buffer[i] = onp.array([*obs, *onp.array(a), onp.array(r), *obs2, float(done)])
         self.buffer_counter += 1 
     
     def sample(self, batch_size):
         record_range = min(self.buffer_counter, self.buffer_capacity)
         idxs = onp.random.choice(record_range, batch_size)
         batch = self.buffer[idxs]
-        obs, a, r, obs2, done = onp.split(batch, [obs_dim, obs_dim+1, obs_dim+2, obs_dim*2+2], axis=-1)
+        obs, a, r, obs2, done = onp.split(batch, [obs_dim, obs_dim+n_actions, obs_dim+n_actions+1, obs_dim*2+1+n_actions], axis=-1)
+        assert obs.shape[-1] == obs_dim and obs2.shape[-1] == obs_dim and a.shape[-1] == n_actions \
+            and r.shape[-1] == 1, (obs.shape, a.shape, r.shape, obs2.shape, r.shape, done.shape)
         return (obs, a, obs2, r, done)
 
     def is_ready(self, batch_size): 
@@ -206,12 +211,13 @@ class OU_Noise:
     def reset(self): self.prev = onp.zeros(self.shape)
 
 #%%
-n_episodes = 100
+n_episodes = 1000
 batch_size = 64 
 buffer_size = 1e6
 gamma = 0.99 
 tau = 0.005 # 1e-4 ## very important parameter -- make or break 
-seed = 420 # 420 works
+seed = onp.random.randint(1e5) # 420 works
+print(f'[LOGGING] seed={seed}')
 
 policy_lr = 1e-3
 q_lr = 2e-3
@@ -277,6 +283,7 @@ for epi_i in tqdm(range(n_episodes)):
         p_params = params[0]
         a = p_frwd(p_params, obs) + eps * action_noise.sample()
         a = np.clip(a, a_low, a_high)
+
         obs2, r, done, _ = env.step(a)
         vbuffer.push((obs, a, obs2, r, done))
         obs = obs2
@@ -303,8 +310,6 @@ for epi_i in tqdm(range(n_episodes)):
         max_reward = sum(rewards)
         with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
             cloudpickle.dump((p_params, q_params), f)
-
-        # np.savez(model_path/f'params_{max_reward:.2f}', p_params=p_params, q_params=q_params)
 
 # %%
 # %%
