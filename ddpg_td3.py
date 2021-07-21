@@ -6,6 +6,7 @@ import haiku as hk
 import optax
 import gym 
 import copy 
+import pathlib 
 import matplotlib.pyplot as plt 
 from torch.utils.tensorboard import SummaryWriter
 
@@ -16,8 +17,8 @@ import collections
 import random 
 from functools import partial
 
-import pybullet as p 
-import pybullet_envs
+# import pybullet as p 
+# import pybullet_envs
 from numpngw import write_apng
 import cloudpickle
 
@@ -27,9 +28,9 @@ config.update("jax_debug_nans", True) # break on nans
 #%%
 # env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
-
 # env_name = 'Pendulum-v0' ## works for this env with correct seed :o
-env_name = 'HalfCheetahBulletEnv-v0'
+env_name = 'BipedalWalker-v3'
+# env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
 n_actions = env.action_space.shape[0]
@@ -72,23 +73,6 @@ def _q_fcn(s, a):
     q_sa = hk.Linear(1, w_init=init_final)(z)
     return q_sa
 
-#%%
-class ReplayBuffer(object): # clean code BUT extremely slow 
-    def __init__(self, capacity):
-        self.buffer = collections.deque(maxlen=int(capacity))
-
-    def push(self, sample):
-        self.buffer.append(sample)
-
-    def sample(self, batch_size):
-        samples = zip(*random.sample(self.buffer, batch_size))
-        samples = tuple(map(lambda x: np.stack(x).astype(np.float32), samples))
-        return samples
-
-    def is_ready(self, batch_size):
-        return batch_size <= len(self.buffer)
-
-#%%
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
@@ -220,7 +204,6 @@ q_frwd = jax.jit(q_fcn.apply)
 p_optim = optax.adam(policy_lr)
 q_optim = optax.adam(q_lr)
 
-import pathlib 
 model_path = pathlib.Path(f'./models/ddpg_td3/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
 
@@ -280,7 +263,7 @@ while step_i < total_n_steps:
 
     # evaluate without any noise 
     eval_rewards = []
-    for _ in range(10):
+    for _ in range(1):
         obs = env.reset()
         epi_reward = 0 
         while True: 
@@ -291,10 +274,10 @@ while step_i < total_n_steps:
             obs = obs2
             if done: break 
         eval_rewards.append(epi_reward)
-    eval_r = onp.mean(eval_rewards)
+    eval_r = onp.sum(eval_rewards)
     
     writer.add_scalar('rollout/total_reward', sum(rewards), step_i)
-    writer.add_scalar('rollout/mean_eval_reward', eval_r, step_i)
+    writer.add_scalar('rollout/total_eval_reward', eval_r, step_i)
     writer.add_scalar('rollout/length', len(rewards), step_i)
 
     if epi_i == 0 or eval_r > max_reward: 
