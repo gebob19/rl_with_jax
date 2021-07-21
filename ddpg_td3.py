@@ -1,4 +1,5 @@
 #%%
+import cv2
 import jax
 import jax.numpy as np 
 import numpy as onp 
@@ -152,6 +153,33 @@ def ddpg_step(params, opt_states, batch):
     grads = (p_grad, q_grad)
     return params, opt_states, losses, grads
 
+def eval(p_params, env, name, max_step):
+    rewards = 0 
+    imgs = []
+    obs = env.reset()
+    for _ in range(max_step):
+        img = env.render(mode='rgb_array')
+        imgs.append(img)
+
+        a = p_frwd(p_params, obs)
+        obs2, r, done, _ = env.step(a)        
+        obs = obs2 
+        rewards += r
+        if done: break 
+
+    print(f'writing len {len(imgs)} total reward {rewards}...')
+    h, w, _ = imgs[0].shape
+    fourcc = cv2.VideoWriter_fourcc(*'XVID')
+    video = cv2.VideoWriter(f'{name}_{rewards:.2f}.mp4', fourcc, 20, (w, h))
+    for img in imgs:
+        video.write(img)
+    cv2.destroyAllWindows()
+    video.release()
+
+    # write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
+
+    return imgs, rewards
+
 class Gaussian_Noise:
     def __init__(self, shape):
         self.shape = shape 
@@ -288,6 +316,10 @@ while step_i < total_n_steps:
 
 pbar.close()
 
-# %%
-# %%
-# %%
+# # %%
+# with open(str(model_path/f'params_309.67'), 'rb') as f: 
+#     p_params, q_params = cloudpickle.load(f)
+
+# imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)
+
+# # %%
