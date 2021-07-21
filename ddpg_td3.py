@@ -19,6 +19,7 @@ from functools import partial
 import pybullet as p 
 import pybullet_envs
 from numpngw import write_apng
+import cloudpickle
 
 from jax.config import config
 config.update("jax_debug_nans", True) # break on nans
@@ -90,43 +91,28 @@ class ReplayBuffer(object): # clean code BUT extremely slow
 #%%
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
-        buffer_capacity = int(buffer_capacity)
-        # Number of "experiences" to store at max
-        self.buffer_capacity = buffer_capacity
-
-        # Its tells us num of times record() was called.
+        self.buffer_capacity = buffer_capacity = int(buffer_capacity)
         self.buffer_counter = 0
+        # obs, obs2, a, r, done
+        self.buffer = onp.zeros((buffer_capacity, 2 * obs_dim + n_actions + 2))
 
-        # Instead of list of tuples as the exp.replay concept go
-        # We use different np.arrays for each tuple element
-        num_states = env.observation_space.shape[0]
-        num_actions = env.action_space.shape[0]
-        self.state_buffer = onp.zeros((self.buffer_capacity, num_states))
-        self.action_buffer = onp.zeros((self.buffer_capacity, num_actions))
-        self.reward_buffer = onp.zeros((self.buffer_capacity, 1))
-        self.dones = onp.zeros((self.buffer_capacity, 1))
-        self.next_state_buffer = onp.zeros((self.buffer_capacity, num_states))
-        self.buffers = [self.state_buffer, self.action_buffer, self.next_state_buffer, self.reward_buffer, self.dones]
-
-    def push(self, obs_tuple):
-        # (obs, a, obs2, r, done)
-        index = self.buffer_counter % self.buffer_capacity
-
-        self.state_buffer[index] = obs_tuple[0]
-        self.action_buffer[index] = obs_tuple[1]
-        self.next_state_buffer[index] = obs_tuple[2]
-        self.reward_buffer[index] = obs_tuple[3]
-        self.dones[index] = float(obs_tuple[4]) # dones T/F -> 1/0
-
-        self.buffer_counter += 1
-
-    def is_ready(self, batch_size): return self.buffer_counter >= batch_size
-
+    def push(self, sample):
+        i = self.buffer_counter % self.buffer_capacity
+        (obs, a, obs2, r, done) = sample
+        self.buffer[i] = onp.array([*obs, *onp.array(a), onp.array(r), *obs2, float(done)])
+        self.buffer_counter += 1 
+    
     def sample(self, batch_size):
         record_range = min(self.buffer_counter, self.buffer_capacity)
-        batch_indices = onp.random.choice(record_range, batch_size)
-        batch = tuple(b[batch_indices] for b in self.buffers)
-        return batch
+        idxs = onp.random.choice(record_range, batch_size)
+        batch = self.buffer[idxs]
+        obs, a, r, obs2, done = onp.split(batch, [obs_dim, obs_dim+n_actions, obs_dim+n_actions+1, obs_dim*2+1+n_actions], axis=-1)
+        assert obs.shape[-1] == obs_dim and obs2.shape[-1] == obs_dim and a.shape[-1] == n_actions \
+            and r.shape[-1] == 1, (obs.shape, a.shape, r.shape, obs2.shape, r.shape, done.shape)
+        return (obs, a, obs2, r, done)
+
+    def is_ready(self, batch_size): 
+        return self.buffer_counter >= batch_size
 
 #%%
 def critic_loss(q_params, target_params, sample):
@@ -201,7 +187,7 @@ class Gaussian_Noise:
 # pendulum = 100epis
 # n_episodes = 100 
 
-total_n_steps = 0.1 * 1e6
+total_n_steps = 1e6
 batch_size = 100 
 buffer_size = 1e6
 gamma = 0.99 
@@ -213,7 +199,7 @@ policy_lr = 1e-3
 q_lr = 1e-3
 
 # metric writer 
-writer = SummaryWriter(comment=f'td3_AHE_{env_name}')
+writer = SummaryWriter(comment=f'td3_AHE_{env_name}_seed{seed}')
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -233,6 +219,10 @@ q_frwd = jax.jit(q_fcn.apply)
 ## optimizers 
 p_optim = optax.adam(policy_lr)
 q_optim = optax.adam(q_lr)
+
+import pathlib 
+model_path = pathlib.Path(f'./models/ddpg_td3/{env_name}')
+model_path.mkdir(exist_ok=True, parents=True)
 
 #%%
 vbuffer = Vector_ReplayBuffer(buffer_size)
@@ -306,6 +296,11 @@ while step_i < total_n_steps:
     writer.add_scalar('rollout/total_reward', sum(rewards), step_i)
     writer.add_scalar('rollout/mean_eval_reward', eval_r, step_i)
     writer.add_scalar('rollout/length', len(rewards), step_i)
+
+    if epi_i == 0 or eval_r > max_reward: 
+        max_reward = eval_r
+        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            cloudpickle.dump((p_params, q_params), f)
 
 pbar.close()
 
