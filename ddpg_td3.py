@@ -245,6 +245,7 @@ q_opt_state = q_optim.init(q_params)
 params = (p_params, q_params, p_params_t, q_params_t)
 opt_states = (p_opt_state, q_opt_state)
 
+#%%
 step_i = 0 
 epi_i = 0
 pbar = tqdm(total=total_n_steps)
