@@ -153,7 +153,7 @@ def ddpg_step(params, opt_states, batch):
     grads = (p_grad, q_grad)
     return params, opt_states, losses, grads
 
-def eval(p_params, env, name, max_step):
+def eval(p_params, env, name, max_step, mp4=True):
     rewards = 0 
     imgs = []
     obs = env.reset()
@@ -168,15 +168,18 @@ def eval(p_params, env, name, max_step):
         if done: break 
 
     print(f'writing len {len(imgs)} total reward {rewards}...')
-    h, w, _ = imgs[0].shape
-    fourcc = cv2.VideoWriter_fourcc(*'XVID')
-    video = cv2.VideoWriter(f'{name}_{rewards:.2f}.mp4', fourcc, 20, (w, h))
-    for img in imgs:
-        video.write(img)
-    cv2.destroyAllWindows()
-    video.release()
-
-    # write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
+    if mp4: 
+        print('... as .mp4')
+        h, w, _ = imgs[0].shape
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        video = cv2.VideoWriter(f'{name}_{rewards:.2f}.mp4', fourcc, 20, (w, h))
+        for img in imgs:
+            video.write(img)
+        cv2.destroyAllWindows()
+        video.release()
+    else:
+        print('... as .png')
+        write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
 
     return imgs, rewards
 
