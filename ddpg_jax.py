@@ -27,7 +27,9 @@ config.update("jax_debug_nans", True) # break on nans
 #%%
 # env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
-env_name = 'Pendulum-v0' ## hyperparams work for this env with correct seed
+# env_name = 'Pendulum-v0' ## hyperparams work for this env with correct seed
+# env_name = 'LunarLanderContinuous-v2'
+env_name = 'BipedalWalker-v3'
 # env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
@@ -36,6 +38,7 @@ obs_dim = env.observation_space.shape[0]
 
 a_high = env.action_space.high[0]
 a_low = env.action_space.low[0]
+assert -a_high == a_low
 
 #%%
 class FanIn_Uniform(hk.initializers.Initializer):
@@ -152,7 +155,7 @@ def eval(p_params, env, name):
         if done: break 
 
     print(f'writing len {len(imgs)} total reward {rewards}...')
-    write_apng(f'{name}_{rewards}.png', imgs, delay=20)
+    write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
 
     return imgs, rewards
 
@@ -266,6 +269,7 @@ import pathlib
 model_path = pathlib.Path(f'./models/ddpg/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
 
+#%%
 step_i = 0 
 for epi_i in tqdm(range(n_episodes)):
 
@@ -304,8 +308,17 @@ for epi_i in tqdm(range(n_episodes)):
         with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
             cloudpickle.dump((p_params, q_params), f)
 
-        # np.savez(model_path/f'params_{max_reward:.2f}', p_params=p_params, q_params=q_params)
+### loading and evaluating model 
+# # %%
+# with open(str(model_path/f'params_-1.13'), 'rb') as f: 
+#     p_params, q_params = cloudpickle.load(f)
 
-# %%
-# %%
+# eval(p_params, env, f'{env_name}_ddpg')
+
+# # %%
+# obs = env.reset() # dummy input 
+# a = np.zeros(env.action_space.shape)
+# p_params = policy_fcn.init(rng, obs)
+# eval(p_params, env, f'{env_name}_initmodel')
+
 # %%
