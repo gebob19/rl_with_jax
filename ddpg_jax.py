@@ -18,8 +18,8 @@ import collections
 import random 
 from functools import partial
 
-import pybullet as p 
-import pybullet_envs
+# import pybullet as p 
+# import pybullet_envs
 from numpngw import write_apng
 
 from jax.config import config
@@ -272,57 +272,57 @@ import pathlib
 model_path = pathlib.Path(f'./models/ddpg/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
 
-#%%
-step_i = 0 
-for epi_i in tqdm(range(n_episodes)):
+# #%%
+# step_i = 0 
+# for epi_i in tqdm(range(n_episodes)):
 
-    action_noise.reset()
-    obs = env.reset()
-    rewards = []
-    while True: 
-        # rollout
-        p_params = params[0]
-        a = p_frwd(p_params, obs) + eps * action_noise.sample()
-        a = np.clip(a, a_low, a_high)
+#     action_noise.reset()
+#     obs = env.reset()
+#     rewards = []
+#     while True: 
+#         # rollout
+#         p_params = params[0]
+#         a = p_frwd(p_params, obs) + eps * action_noise.sample()
+#         a = np.clip(a, a_low, a_high)
 
-        obs2, r, done, _ = env.step(a)
-        vbuffer.push((obs, a, obs2, r, done))
-        obs = obs2
-        rewards.append(onp.asanyarray(r))
+#         obs2, r, done, _ = env.step(a)
+#         vbuffer.push((obs, a, obs2, r, done))
+#         obs = obs2
+#         rewards.append(onp.asanyarray(r))
         
-        # update
-        if not vbuffer.is_ready(batch_size): continue
-        batch = vbuffer.sample(batch_size)
-        params, opt_states, losses, grads = ddpg_step(params, opt_states, batch)
+#         # update
+#         if not vbuffer.is_ready(batch_size): continue
+#         batch = vbuffer.sample(batch_size)
+#         params, opt_states, losses, grads = ddpg_step(params, opt_states, batch)
 
-        p_loss, q_loss = losses
-        writer.add_scalar('loss/policy', p_loss.item(), step_i)
-        writer.add_scalar('loss/q_fcn', q_loss.item(), step_i)
+#         p_loss, q_loss = losses
+#         writer.add_scalar('loss/policy', p_loss.item(), step_i)
+#         writer.add_scalar('loss/q_fcn', q_loss.item(), step_i)
             
-        step_i += 1 
-        if done: break 
+#         step_i += 1 
+#         if done: break 
     
-    writer.add_scalar('rollout/total_reward', sum(rewards), epi_i)
-    writer.add_scalar('rollout/length', len(rewards), epi_i)
+#     writer.add_scalar('rollout/total_reward', sum(rewards), epi_i)
+#     writer.add_scalar('rollout/length', len(rewards), epi_i)
 
-    eps -= eps_decay # decay exploration 
+#     eps -= eps_decay # decay exploration 
 
-    if epi_i == 0 or sum(rewards) > max_reward: 
-        max_reward = sum(rewards)
-        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
-            cloudpickle.dump((p_params, q_params), f)
+#     if epi_i == 0 or sum(rewards) > max_reward: 
+#         max_reward = sum(rewards)
+#         with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+#             cloudpickle.dump((p_params, q_params), f)
 
-### loading and evaluating model 
-# # %%
-# with open(str(model_path/f'params_-1.13'), 'rb') as f: 
-#     p_params, q_params = cloudpickle.load(f)
+## loading and evaluating model 
+# %%
+with open(str(model_path/f'params_-2.11'), 'rb') as f: 
+    p_params, q_params = cloudpickle.load(f)
 
-# eval(p_params, env, f'{env_name}_ddpg')
+eval(p_params, env, f'{env_name}_ddpg')
 
-# # %%
-# obs = env.reset() # dummy input 
-# a = np.zeros(env.action_space.shape)
-# p_params = policy_fcn.init(rng, obs)
-# eval(p_params, env, f'{env_name}_initmodel')
+# %%
+obs = env.reset() # dummy input 
+a = np.zeros(env.action_space.shape)
+p_params = policy_fcn.init(rng, obs)
+eval(p_params, env, f'{env_name}_initmodel')
 
 # %%

@@ -26,7 +26,7 @@ class DiffFrame(gym.Wrapper):
         return obs 
     
     def step(self, a):
-        obs2, r, done, info = self.env.step(a) # NOOP
+        obs2, r, done, info = self.env.step(a) 
         obs = obs2 - self.prev_frame
         self.prev_frame = obs2 
         return obs, r, done, info
