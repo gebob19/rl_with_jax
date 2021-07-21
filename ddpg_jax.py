@@ -65,10 +65,10 @@ def _policy_fcn(s):
     return a
 
 def _q_fcn(s, a):
-    z1 = middle_layer(16)(s)
-    z1 = middle_layer(32)(z1)
+    z1 = middle_layer(256)(s)
+    z1 = middle_layer(256)(z1)
 
-    z2 = middle_layer(32)(a)
+    z2 = middle_layer(256)(a)
     z = np.concatenate([z1, z2])
     z = middle_layer(256)(z)
     z = middle_layer(256)(z)
@@ -223,7 +223,7 @@ policy_lr = 1e-3
 q_lr = 2e-3
 
 # metric writer 
-writer = SummaryWriter(comment=f'{env_name}')
+writer = SummaryWriter(comment=f'{env_name}_seed={seed}')
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
