@@ -36,7 +36,8 @@ class FlattenObs(gym.ObservationWrapper):
     def observation(self, obs):
         return obs.flatten()
 
-env_name = 'PongNoFrameskip-v4'
+env_name = 'Pong-v0'
+# env_name = 'PongNoFrameskip-v4'
 def make_env():
     env = gym.make(env_name)
     env = FireResetEnv(env)
@@ -44,7 +45,7 @@ def make_env():
     env = WarpFrame(env)
     env = ScaledFloatFrame(env)
     env = DiffFrame(env)
-    env = FlattenObs(env)
+    # env = FlattenObs(env)
     return env 
 
 env = make_env()
@@ -57,17 +58,37 @@ obs_dim = obs.shape[0]
 
 print(f'[LOGGER] obs_dim: {obs_dim} n_actions: {n_actions}')
 
+# def _policy_value(obs):
+#     pi = hk.Sequential([
+#         hk.Linear(128), jax.nn.relu, 
+#         hk.Linear(128), jax.nn.relu,
+#         hk.Linear(n_actions), jax.nn.softmax
+#     ])(obs)
+#     v = hk.Sequential([
+#         hk.Linear(128), jax.nn.relu, 
+#         hk.Linear(128), jax.nn.relu,
+#         hk.Linear(1),
+#     ])(obs)
+#     return pi, v
+
 def _policy_value(obs):
+    backbone = hk.Sequential([
+        hk.Conv2D(16, 8, 4), jax.nn.relu, 
+        hk.Conv2D(32, 4, 2), jax.nn.relu, 
+    ])
+    z = backbone(obs)
+    z = np.reshape(z, (-1,))
+
     pi = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
         hk.Linear(n_actions), jax.nn.softmax
-    ])(obs)
+    ])(z)
     v = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
         hk.Linear(1),
-    ])(obs)
+    ])(z)
     return pi, v
 
 policy_value = hk.transform(_policy_value)

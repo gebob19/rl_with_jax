@@ -18,8 +18,8 @@ import collections
 import random 
 from functools import partial
 
-# import pybullet as p 
-# import pybullet_envs
+import pybullet as p 
+import pybullet_envs
 from numpngw import write_apng
 
 from jax.config import config
@@ -29,8 +29,8 @@ config.update("jax_debug_nans", True) # break on nans
 # env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
 # env_name = 'Pendulum-v0' ## hyperparams work for this env with correct seed
-env_name = 'BipedalWalker-v3'
-# env_name = 'HalfCheetahBulletEnv-v0'
+# env_name = 'BipedalWalker-v3'
+env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
 n_actions = env.action_space.shape[0]
@@ -314,15 +314,17 @@ model_path.mkdir(exist_ok=True, parents=True)
 
 ## loading and evaluating model 
 # %%
-with open(str(model_path/f'params_-2.11'), 'rb') as f: 
+ppath = str(model_path/f'params_-2.11')
+ppath = 'models/ddpg_td3/params_854.89'
+with open(ppath, 'rb') as f: 
     p_params, q_params = cloudpickle.load(f)
 
 eval(p_params, env, f'{env_name}_ddpg')
 
-# %%
-obs = env.reset() # dummy input 
-a = np.zeros(env.action_space.shape)
-p_params = policy_fcn.init(rng, obs)
-eval(p_params, env, f'{env_name}_initmodel')
+# # %%
+# obs = env.reset() # dummy input 
+# a = np.zeros(env.action_space.shape)
+# p_params = policy_fcn.init(rng, obs)
+# eval(p_params, env, f'{env_name}_initmodel')
 
 # %%

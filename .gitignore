@@ -1,7 +1,9 @@
+ROM/
 tmp/
 runs/
 models/
 baselines/
+*.rar
 *.pdf
 *.db
 
