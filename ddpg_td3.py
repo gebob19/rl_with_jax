@@ -23,8 +23,8 @@ import pybullet_envs
 from numpngw import write_apng
 import cloudpickle
 
-from jax.config import config
-config.update("jax_debug_nans", True) # break on nans
+jax.config.update("jax_debug_nans", True) # break on nans
+jax.config.update('jax_platform_name', 'cpu') # :(
 
 #%%
 # env_name = 'AntBulletEnv-v0'
