@@ -36,7 +36,7 @@ class FlattenObs(gym.ObservationWrapper):
     def observation(self, obs):
         return obs.flatten()
 
-env_name = 'Pong-v0'
+env_name = 'PongNoFrameskip-v4'
 def make_env():
     env = gym.make(env_name)
     env = FireResetEnv(env)
@@ -187,11 +187,11 @@ optim = optax.chain(
 )
 opt_state = optim.init(params)
 
-n_envs = 1
+n_envs = 16
 worker = Worker.remote()
 
 from torch.utils.tensorboard import SummaryWriter
-from tqdm.notebook import tqdm 
+from tqdm import tqdm 
 import cloudpickle
 
 writer = SummaryWriter(comment=f'a2c_pong_n-envs{n_envs}_seed{seed}')

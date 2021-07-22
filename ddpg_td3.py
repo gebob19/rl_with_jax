@@ -34,6 +34,13 @@ jax.config.update('jax_platform_name', 'cpu') # :(
 env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
+# walk backwards 
+env.unwrapped.robot.walk_target_x = -1000.
+env.unwrapped.robot.start_pos_x = 500
+env.unwrapped.robot.body_xyz = [500, 0, 0]
+env.unwrapped.walk_target_x = -1e3
+env_name += '_backwards_2'
+
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
 
@@ -320,10 +327,10 @@ while step_i < total_n_steps:
 
 pbar.close()
 
-# %%
-with open(str(model_path/f'params_200.85'), 'rb') as f: 
-    p_params, q_params = cloudpickle.load(f)
+# # %%
+# with open(str(model_path/f'params_200.85'), 'rb') as f: 
+#     p_params, q_params = cloudpickle.load(f)
 
-imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)
+# imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)
 
 # %%
