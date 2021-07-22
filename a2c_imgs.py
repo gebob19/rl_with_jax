@@ -42,7 +42,7 @@ env = NoopResetEnv(env, noop_max=50)
 env = WarpFrame(env)
 env = ScaledFloatFrame(env)
 env = DiffFrame(env)
-env = FlattenObs(env)
+# env = FlattenObs(env)
 
 #%%
 obs = env.reset()
@@ -57,3 +57,44 @@ for _ in range(20):
     if done: break 
 
 # %%
+n_actions = env.action_space.n
+obs = env.reset()
+obs_dim = obs.shape[0]
+
+def _policy_value(obs):
+    backbone = hk.Sequential([
+        hk.Conv2D(16, 8, 4), jax.nn.relu, 
+        hk.Conv2D(32, 4, 2), jax.nn.relu, 
+    ])
+    z = backbone(obs)
+    z = np.reshape(z, (-1,))
+
+    pi = hk.Sequential([
+        hk.Linear(128), jax.nn.relu, 
+        hk.Linear(128), jax.nn.relu,
+        hk.Linear(n_actions), jax.nn.softmax
+    ])(z)
+    v = hk.Sequential([
+        hk.Linear(128), jax.nn.relu, 
+        hk.Linear(128), jax.nn.relu,
+        hk.Linear(1),
+    ])(z)
+    return pi, v
+
+policy_value = hk.transform(_policy_value)
+policy_value = hk.without_apply_rng(policy_value)
+pv_frwd = jax.jit(policy_value.apply)
+
+seed = 0 
+rng = jax.random.PRNGKey(seed)
+
+obs = env.reset() # dummy input 
+a = np.zeros(env.action_space.shape)
+params = policy_value.init(rng, obs) 
+
+#%%
+pi, v = pv_frwd(params, obs)
+pi.shape
+
+#%%
+#%%

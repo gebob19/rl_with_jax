@@ -6,11 +6,14 @@ import numpy as np
 import gym
 import matplotlib.pyplot as plt 
 
-#%%
-env = gym.make('CartPoleContinuousBulletEnv-v0')
+# env = gym.make('CartPoleContinuousBulletEnv-v0')
 # env = gym.make('AntBulletEnv-v0')
+env = gym.make('HalfCheetahBulletEnv-v0')
 obs = env.reset()
 obs.shape
+
+#%%
+
 
 #%%
 imgs = []
