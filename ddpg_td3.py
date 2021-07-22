@@ -1,4 +1,5 @@
 #%%
+import cv2
 import jax
 import jax.numpy as np 
 import numpy as onp 
@@ -26,11 +27,11 @@ jax.config.update("jax_debug_nans", True) # break on nans
 jax.config.update('jax_platform_name', 'cpu') # :(
 
 #%%
-env_name = 'AntBulletEnv-v0'
+# env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
 # env_name = 'Pendulum-v0' ## works for this env with correct seed :o
 # env_name = 'BipedalWalker-v3'
-# env_name = 'HalfCheetahBulletEnv-v0'
+env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
 n_actions = env.action_space.shape[0]
@@ -40,6 +41,7 @@ a_high = env.action_space.high[0]
 a_low = env.action_space.low[0]
 
 print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
+assert -a_high == a_low
 
 #%%
 class FanIn_Uniform(hk.initializers.Initializer):
@@ -151,6 +153,36 @@ def ddpg_step(params, opt_states, batch):
     losses = (p_loss, q_loss)
     grads = (p_grad, q_grad)
     return params, opt_states, losses, grads
+
+def eval(p_params, env, name, max_step, mp4=True):
+    rewards = 0 
+    imgs = []
+    obs = env.reset()
+    for _ in range(max_step):
+        img = env.render(mode='rgb_array')
+        imgs.append(img)
+
+        a = p_frwd(p_params, obs)
+        obs2, r, done, _ = env.step(a)        
+        obs = obs2 
+        rewards += r
+        if done: break 
+
+    print(f'writing len {len(imgs)} total reward {rewards}...')
+    if mp4: 
+        print('... as .mp4')
+        h, w, _ = imgs[0].shape
+        fourcc = cv2.VideoWriter_fourcc(*'XVID')
+        video = cv2.VideoWriter(f'{name}_{rewards:.2f}.mp4', fourcc, 20, (w, h))
+        for img in imgs:
+            video.write(img)
+        cv2.destroyAllWindows()
+        video.release()
+    else:
+        print('... as .png')
+        write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
+
+    return imgs, rewards
 
 class Gaussian_Noise:
     def __init__(self, shape):
@@ -275,7 +307,7 @@ while step_i < total_n_steps:
             obs = obs2
             if done: break 
         eval_rewards.append(epi_reward)
-    eval_r = onp.sum(eval_rewards)
+    eval_r = onp.mean(eval_rewards)
     
     writer.add_scalar('rollout/total_reward', sum(rewards), step_i)
     writer.add_scalar('rollout/total_eval_reward', eval_r, step_i)
@@ -289,5 +321,9 @@ while step_i < total_n_steps:
 pbar.close()
 
 # %%
-# %%
+with open(str(model_path/f'params_200.85'), 'rb') as f: 
+    p_params, q_params = cloudpickle.load(f)
+
+imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)
+
 # %%
