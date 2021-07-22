@@ -17,19 +17,19 @@ import collections
 import random 
 from functools import partial
 
-# import pybullet as p 
-# import pybullet_envs
+import pybullet as p 
+import pybullet_envs
 from numpngw import write_apng
 import cloudpickle
 
-from jax.config import config
-config.update("jax_debug_nans", True) # break on nans
+jax.config.update("jax_debug_nans", True) # break on nans
+jax.config.update('jax_platform_name', 'cpu') # :(
 
 #%%
-# env_name = 'AntBulletEnv-v0'
+env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
 # env_name = 'Pendulum-v0' ## works for this env with correct seed :o
-env_name = 'BipedalWalker-v3'
+# env_name = 'BipedalWalker-v3'
 # env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
