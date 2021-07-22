@@ -9,7 +9,6 @@ import haiku as hk
 import optax
 from functools import partial
 
-#%%
 from baselines.common.atari_wrappers import FireResetEnv, WarpFrame, \
     ScaledFloatFrame, NoopResetEnv
 
@@ -31,14 +30,19 @@ class DiffFrame(gym.Wrapper):
         self.prev_frame = obs2 
         return obs, r, done, info
 
+class FlattenObs(gym.ObservationWrapper):
+    def observation(self, obs):
+        return obs.flatten()
+
 #%%
 env_name = 'Pong-v0'
 env = gym.make(env_name)
 env = FireResetEnv(env)
-env = NoopResetEnv(env, noop_max=30)
+env = NoopResetEnv(env, noop_max=50)
 env = WarpFrame(env)
 env = ScaledFloatFrame(env)
 env = DiffFrame(env)
+env = FlattenObs(env)
 
 #%%
 obs = env.reset()

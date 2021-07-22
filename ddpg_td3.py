@@ -18,8 +18,8 @@ import collections
 import random 
 from functools import partial
 
-# import pybullet as p 
-# import pybullet_envs
+import pybullet as p 
+import pybullet_envs
 from numpngw import write_apng
 import cloudpickle
 
@@ -30,8 +30,8 @@ config.update("jax_debug_nans", True) # break on nans
 # env_name = 'AntBulletEnv-v0'
 # env_name = 'CartPoleContinuousBulletEnv-v0'
 # env_name = 'Pendulum-v0' ## works for this env with correct seed :o
-env_name = 'BipedalWalker-v3'
-# env_name = 'HalfCheetahBulletEnv-v0'
+# env_name = 'BipedalWalker-v3'
+env_name = 'HalfCheetahBulletEnv-v0'
 
 env = gym.make(env_name)
 n_actions = env.action_space.shape[0]
@@ -41,6 +41,7 @@ a_high = env.action_space.high[0]
 a_low = env.action_space.low[0]
 
 print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
+assert -a_high == a_low
 
 #%%
 class FanIn_Uniform(hk.initializers.Initializer):
@@ -306,7 +307,7 @@ while step_i < total_n_steps:
             obs = obs2
             if done: break 
         eval_rewards.append(epi_reward)
-    eval_r = onp.sum(eval_rewards)
+    eval_r = onp.mean(eval_rewards)
     
     writer.add_scalar('rollout/total_reward', sum(rewards), step_i)
     writer.add_scalar('rollout/total_eval_reward', eval_r, step_i)
@@ -319,10 +320,10 @@ while step_i < total_n_steps:
 
 pbar.close()
 
-# # %%
-# with open(str(model_path/f'params_309.67'), 'rb') as f: 
-#     p_params, q_params = cloudpickle.load(f)
+# %%
+with open(str(model_path/f'params_200.85'), 'rb') as f: 
+    p_params, q_params = cloudpickle.load(f)
 
-# imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)
+imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)
 
-# # %%
+# %%

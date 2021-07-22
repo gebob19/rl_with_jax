@@ -11,21 +11,61 @@ from functools import partial
 #%%
 ray.init()
 
-env_name = 'CartPole-v0'
-env = gym.make(env_name)
+from baselines.common.atari_wrappers import FireResetEnv, WarpFrame, \
+    ScaledFloatFrame, NoopResetEnv
+
+class DiffFrame(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.prev_frame = None 
+    
+    def reset(self):
+        obs = self.env.reset()
+        obs2, _, _, _ = self.env.step(0) # NOOP 
+        obs = obs2 - obs 
+        self.prev_frame = obs2 
+        return obs 
+    
+    def step(self, a):
+        obs2, r, done, info = self.env.step(a) 
+        obs = obs2 - self.prev_frame
+        self.prev_frame = obs2 
+        return obs, r, done, info
+
+class FlattenObs(gym.ObservationWrapper):
+    def observation(self, obs):
+        return obs.flatten()
+
+env_name = 'Pong-v0'
+def make_env():
+    env = gym.make(env_name)
+    env = FireResetEnv(env)
+    env = NoopResetEnv(env, noop_max=50)
+    env = WarpFrame(env)
+    env = ScaledFloatFrame(env)
+    env = DiffFrame(env)
+    env = FlattenObs(env)
+    return env 
+
+env = make_env()
+# env_name = 'CartPole-v0'
+# env = gym.make(env_name)
 
 n_actions = env.action_space.n
-obs_dim = env.observation_space.shape[0]
+obs = env.reset()
+obs_dim = obs.shape[0]
+
+print(f'[LOGGER] obs_dim: {obs_dim} n_actions: {n_actions}')
 
 def _policy_value(obs):
     pi = hk.Sequential([
-        hk.Linear(64), jax.nn.relu, 
-        hk.Linear(64), jax.nn.relu,
+        hk.Linear(128), jax.nn.relu, 
+        hk.Linear(128), jax.nn.relu,
         hk.Linear(n_actions), jax.nn.softmax
     ])(obs)
     v = hk.Sequential([
-        hk.Linear(64), jax.nn.relu, 
-        hk.Linear(64), jax.nn.relu,
+        hk.Linear(128), jax.nn.relu, 
+        hk.Linear(128), jax.nn.relu,
         hk.Linear(1),
     ])(obs)
     return pi, v
@@ -48,8 +88,9 @@ class Categorical: # similar to pytorch categorical
 
 @ray.remote
 class Worker: 
-    def __init__(self, env_name, gamma=0.99, max_n_steps=200):
-        self.env = gym.make(env_name)
+    def __init__(self, gamma=0.99, max_n_steps=200):
+        # self.env = gym.make(env_name)
+        self.env = make_env()
         self.max_n = max_n_steps
         self.gamma = gamma
         # create jax policy fcn -- need to define in .remote due to pickling 
@@ -128,8 +169,12 @@ def a2c_step(samples, params, opt_state):
     return loss, ploss, vloss, opt_state, params, grad
 
 #%%
-seed = 0
+seed = onp.random.randint(1e5)
 rng = jax.random.PRNGKey(seed)
+
+import random 
+onp.random.seed(seed)
+random.seed(seed)
 
 obs = env.reset() # dummy input 
 a = np.zeros(env.action_space.shape)
@@ -142,19 +187,35 @@ optim = optax.chain(
 )
 opt_state = optim.init(params)
 
-n_envs = 4
-worker = Worker.remote(env_name)
+n_envs = 1
+worker = Worker.remote()
 
+from torch.utils.tensorboard import SummaryWriter
 from tqdm.notebook import tqdm 
+import cloudpickle
 
-for i in tqdm(range(1000)):
+writer = SummaryWriter(comment=f'a2c_pong_n-envs{n_envs}_seed{seed}')
+
+import pathlib 
+model_path = pathlib.Path(f'./models/a2c/{env_name}')
+model_path.mkdir(exist_ok=True, parents=True)
+
+for step_i in tqdm(range(1000)):
     rollouts = ray.get([worker.rollout.remote(params) for _ in range(n_envs)])
     samples = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
 
     loss, ploss, vloss, opt_state, params, grads = a2c_step(samples, params, opt_state)
+    writer.add_scalar('loss/policy', ploss.item(), step_i)
+    writer.add_scalar('loss/critic', vloss.item(), step_i)
+    writer.add_scalar('loss/total', loss.item(), step_i)
 
-    r = eval(params, env)
-    print(f'episode {i}: {r}')
+    eval_r = eval(params, env)
+    writer.add_scalar('rollout/eval_reward', eval_r, step_i)
+
+    if step_i == 0 or eval_r > max_reward: 
+        max_reward = eval_r
+        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            cloudpickle.dump(params, f) 
 
 #%%
 #%%
