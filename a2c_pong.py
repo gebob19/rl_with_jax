@@ -11,6 +11,7 @@ from functools import partial
 #%%
 ray.init()
 
+#%%
 from baselines.common.atari_wrappers import FireResetEnv, WarpFrame, \
     ScaledFloatFrame, NoopResetEnv
 
@@ -36,26 +37,44 @@ class FlattenObs(gym.ObservationWrapper):
     def observation(self, obs):
         return obs.flatten()
 
-env_name = 'CartPole-v0'
-env = gym.make(env_name)
+# env_name = 'Pong-v0'
+env_name = 'PongNoFrameskip-v4'
+def make_env():
+    env = gym.make(env_name)
+    env = FireResetEnv(env)
+    env = NoopResetEnv(env, noop_max=50)
+    env = WarpFrame(env)
+    env = ScaledFloatFrame(env)
+    env = DiffFrame(env)
+    # env = FlattenObs(env)
+    return env 
+
+env = make_env()
 
 n_actions = env.action_space.n
 obs = env.reset()
-obs_dim = obs.shape[0]
+obs_dim = obs.shape
 
 print(f'[LOGGER] obs_dim: {obs_dim} n_actions: {n_actions}')
 
 def _policy_value(obs):
+    backbone = hk.Sequential([
+        hk.Conv2D(16, 8, 4), jax.nn.relu, 
+        hk.Conv2D(32, 4, 2), jax.nn.relu, 
+    ])
+    z = backbone(obs)
+    z = np.reshape(z, (-1,))
+
     pi = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
         hk.Linear(n_actions), jax.nn.softmax
-    ])(obs)
+    ])(z)
     v = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
         hk.Linear(1),
-    ])(obs)
+    ])(z)
     return pi, v
 
 policy_value = hk.transform(_policy_value)
@@ -74,11 +93,13 @@ class Categorical: # similar to pytorch categorical
     def log_prob(self, i): return np.log(self.probs[i])
     def entropy(self): return -(self.probs * np.log(self.probs)).sum()
 
+#%%
 @ray.remote
 class Worker: 
     def __init__(self, gamma=0.99, max_n_steps=200):
-        self.env = gym.make(env_name)
-        # self.env = make_env()
+        # self.env = gym.make(env_name)
+        self.env = make_env()
+        self.obs_size = onp.prod(obs_dim)
         self.max_n = max_n_steps
         self.gamma = gamma
         # create jax policy fcn -- need to define in .remote due to pickling 
@@ -88,7 +109,7 @@ class Worker:
 
     def rollout(self, params):
         # obs, obs2 + a, r, done, 
-        v_buffer = onp.zeros((self.max_n, 2 * obs_dim + 3))
+        v_buffer = onp.zeros((self.max_n, 2 * self.obs_size + 3))
 
         obs = self.env.reset()
         for i in range(self.max_n):
@@ -96,13 +117,16 @@ class Worker:
             a = Categorical(a_probs).sample() # stochastic sample
 
             obs2, r, done, _ = self.env.step(a)        
-            v_buffer[i] = onp.array([*obs, a, r, *obs2, float(done)])
+            v_buffer[i] = onp.array([*obs.flatten(), a, r, *obs2.flatten(), float(done)])
 
             obs = obs2 
             if done: break 
         
         v_buffer = v_buffer[:i+1]
-        obs, a, r, obs2, done = onp.split(v_buffer, [obs_dim, obs_dim+1, obs_dim+2, obs_dim*2+2], axis=-1)
+        obs, a, r, obs2, done = onp.split(v_buffer, [self.obs_size, self.obs_size+1, self.obs_size+2, self.obs_size*2+2], axis=-1)
+
+        obs = obs.reshape(-1, *obs_dim)
+        obs2 = obs2.reshape(-1, *obs_dim)
 
         for i in range(len(r) - 1)[::-1]:
             r[i] = r[i] + self.gamma * r[i + 1]
@@ -176,6 +200,7 @@ optim = optax.chain(
 opt_state = optim.init(params)
 
 n_envs = 1
+n_steps = 1 #1000
 worker = Worker.remote()
 
 from torch.utils.tensorboard import SummaryWriter
@@ -188,7 +213,7 @@ import pathlib
 model_path = pathlib.Path(f'./models/a2c/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
 
-for step_i in tqdm(range(1000)):
+for step_i in tqdm(range(n_steps)):
     rollouts = ray.get([worker.rollout.remote(params) for _ in range(n_envs)])
     samples = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
 
@@ -196,6 +221,7 @@ for step_i in tqdm(range(1000)):
     writer.add_scalar('loss/policy', ploss.item(), step_i)
     writer.add_scalar('loss/critic', vloss.item(), step_i)
     writer.add_scalar('loss/total', loss.item(), step_i)
+    writer.add_scalar('loss/batch_size', samples[0].shape[0], step_i)
 
     eval_r = eval(params, env)
     writer.add_scalar('rollout/eval_reward', eval_r, step_i)

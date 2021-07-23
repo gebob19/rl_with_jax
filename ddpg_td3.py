@@ -325,12 +325,12 @@ opt_states = (p_opt_state, q_opt_state)
 # pbar.close()
 
 # %%
-ppath = str(model_path/f'params_648.57')
+ppath = str(model_path/f'params_2075.77')
 # ppath = 'models/ddpg_td3/params_854.89'
 
 with open(ppath, 'rb') as f: 
     p_params, q_params = cloudpickle.load(f)
 
-imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=int(1e3))
+imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)#int(1e3))
 
 # %%
