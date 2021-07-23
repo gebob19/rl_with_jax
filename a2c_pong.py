@@ -39,6 +39,7 @@ class FlattenObs(gym.ObservationWrapper):
 
 # env_name = 'Pong-v0'
 env_name = 'PongNoFrameskip-v4'
+
 def make_env():
     env = gym.make(env_name)
     env = FireResetEnv(env)
