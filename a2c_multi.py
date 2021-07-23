@@ -11,31 +11,6 @@ from functools import partial
 #%%
 ray.init()
 
-from baselines.common.atari_wrappers import FireResetEnv, WarpFrame, \
-    ScaledFloatFrame, NoopResetEnv
-
-class DiffFrame(gym.Wrapper):
-    def __init__(self, env):
-        super().__init__(env)
-        self.prev_frame = None 
-    
-    def reset(self):
-        obs = self.env.reset()
-        obs2, _, _, _ = self.env.step(0) # NOOP 
-        obs = obs2 - obs 
-        self.prev_frame = obs2 
-        return obs 
-    
-    def step(self, a):
-        obs2, r, done, info = self.env.step(a) 
-        obs = obs2 - self.prev_frame
-        self.prev_frame = obs2 
-        return obs, r, done, info
-
-class FlattenObs(gym.ObservationWrapper):
-    def observation(self, obs):
-        return obs.flatten()
-
 env_name = 'CartPole-v0'
 env = gym.make(env_name)
 
@@ -182,7 +157,7 @@ from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm 
 import cloudpickle
 
-writer = SummaryWriter(comment=f'a2c_pong_n-envs{n_envs}_seed{seed}')
+writer = SummaryWriter(comment=f'{env_name}_n-envs{n_envs}_seed{seed}')
 
 import pathlib 
 model_path = pathlib.Path(f'./models/a2c/{env_name}')
