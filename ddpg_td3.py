@@ -36,7 +36,10 @@ env_name = 'HalfCheetahBulletEnv-v0'
 env = gym.make(env_name)
 # walk backwards 
 env.unwrapped.robot.walk_target_x = -1000.
-env_name += '_backwards'
+env.unwrapped.robot.start_pos_x = 500
+env.unwrapped.robot.body_xyz = [500, 0, 0]
+env.unwrapped.walk_target_x = -1e3
+env_name += '_backwards_2'
 
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]

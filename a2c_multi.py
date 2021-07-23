@@ -175,11 +175,11 @@ optim = optax.chain(
 )
 opt_state = optim.init(params)
 
-n_envs = 1
+n_envs = 16
 worker = Worker.remote()
 
 from torch.utils.tensorboard import SummaryWriter
-from tqdm.notebook import tqdm 
+from tqdm import tqdm 
 import cloudpickle
 
 writer = SummaryWriter(comment=f'a2c_pong_n-envs{n_envs}_seed{seed}')
