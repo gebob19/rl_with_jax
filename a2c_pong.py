@@ -8,6 +8,10 @@ import haiku as hk
 import optax
 from functools import partial
 
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm 
+import cloudpickle
+
 #%%
 ray.init()
 
@@ -59,12 +63,19 @@ obs_dim = obs.shape
 print(f'[LOGGER] obs_dim: {obs_dim} n_actions: {n_actions}')
 
 def _policy_value(obs):
-    backbone = hk.Sequential([
+    backbone1 = hk.Sequential([
         hk.Conv2D(16, 8, 4), jax.nn.relu, 
         hk.Conv2D(32, 4, 2), jax.nn.relu, 
     ])
-    z = backbone(obs)
+    z = backbone1(obs)
     z = np.reshape(z, (-1,))
+    
+    backbone2 = hk.Sequential([
+        hk.Conv2D(16, 8, 4), jax.nn.relu, 
+        hk.Conv2D(32, 4, 2), jax.nn.relu, 
+    ])
+    z2 = backbone2(obs)
+    z2 = np.reshape(z2, (-1,))
 
     pi = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
@@ -75,7 +86,7 @@ def _policy_value(obs):
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
         hk.Linear(1),
-    ])(z)
+    ])(z2)
     return pi, v
 
 policy_value = hk.transform(_policy_value)
@@ -128,11 +139,12 @@ class Worker:
 
         obs = obs.reshape(-1, *obs_dim)
         obs2 = obs2.reshape(-1, *obs_dim)
+        total_reward = np.array([r.sum()])
 
         for i in range(len(r) - 1)[::-1]:
             r[i] = r[i] + self.gamma * r[i + 1]
 
-        return obs, a, r, obs2, done
+        return obs, a, r, obs2, done, total_reward
 
 #%%
 def eval(params, env):
@@ -200,15 +212,13 @@ optim = optax.chain(
 )
 opt_state = optim.init(params)
 
-n_envs = 1
-n_steps = 1 #1000
+n_envs = 24
+n_steps = 1000
 worker = Worker.remote()
 
-from torch.utils.tensorboard import SummaryWriter
-from tqdm.notebook import tqdm 
-import cloudpickle
-
+#%%
 writer = SummaryWriter(comment=f'a2c_pong_n-envs{n_envs}_seed{seed}')
+max_reward = -float('inf')
 
 import pathlib 
 model_path = pathlib.Path(f'./models/a2c/{env_name}')
@@ -217,20 +227,32 @@ model_path.mkdir(exist_ok=True, parents=True)
 for step_i in tqdm(range(n_steps)):
     rollouts = ray.get([worker.rollout.remote(params) for _ in range(n_envs)])
     samples = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
+    
+    env_rewards = samples[-1]
+    for i in range(n_envs): writer.add_scalar(f'envs/env_{i}_total_reward', env_rewards[i])
 
+    samples = samples[:-1] # remove total reward
     loss, ploss, vloss, opt_state, params, grads = a2c_step(samples, params, opt_state)
     writer.add_scalar('loss/policy', ploss.item(), step_i)
     writer.add_scalar('loss/critic', vloss.item(), step_i)
     writer.add_scalar('loss/total', loss.item(), step_i)
     writer.add_scalar('loss/batch_size', samples[0].shape[0], step_i)
 
-    eval_r = eval(params, env)
-    writer.add_scalar('rollout/eval_reward', eval_r, step_i)
+    obs, a, r, done, _ = samples 
+    a_probs, v_s = jax.vmap(lambda o: pv_frwd(params, o))(obs)
+    mean_entropy = jax.vmap(lambda p: Categorical(p).entropy())(a_probs).mean()
+    mean_value = v_s.mean()
+    writer.add_scalar('policy/mean_entropy', mean_entropy, step_i)
+    writer.add_scalar('critic/mean_value', mean_value, step_i)
 
-    if step_i == 0 or eval_r > max_reward: 
-        max_reward = eval_r
-        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
-            cloudpickle.dump(params, f) 
+    if (step_i + 1) % 100 == 0:
+        eval_r = eval(params, env)
+        writer.add_scalar('rollout/eval_reward', eval_r, step_i)
+
+        if eval_r > max_reward: 
+            max_reward = eval_r
+            with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+                cloudpickle.dump(params, f) 
 
 #%%
 #%%

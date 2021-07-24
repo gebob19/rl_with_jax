@@ -51,30 +51,31 @@ class Categorical: # similar to pytorch categorical
 
 @ray.remote
 class Worker: 
-    def __init__(self, gamma=0.99, max_n_steps=200):
+    def __init__(self, gamma=0.99):
         self.env = gym.make(env_name)
-        # self.env = make_env()
-        self.max_n = max_n_steps
+        self.obs = self.env.reset()
+
         self.gamma = gamma
         # create jax policy fcn -- need to define in .remote due to pickling 
         policy_value = hk.transform(_policy_value)
         policy_value = hk.without_apply_rng(policy_value)
         self.pv_frwd = jax.jit(policy_value.apply) # forward fcn
 
-    def rollout(self, params):
+    def rollout(self, params, n_steps):
         # obs, obs2 + a, r, done, 
-        v_buffer = onp.zeros((self.max_n, 2 * obs_dim + 3))
+        v_buffer = onp.zeros((n_steps, 2 * obs_dim + 3))
 
-        obs = self.env.reset()
-        for i in range(self.max_n):
-            a_probs, _ = self.pv_frwd(params, obs)
+        for i in range(n_steps):
+            a_probs, _ = self.pv_frwd(params, self.obs)
             a = Categorical(a_probs).sample() # stochastic sample
 
             obs2, r, done, _ = self.env.step(a)        
-            v_buffer[i] = onp.array([*obs, a, r, *obs2, float(done)])
+            v_buffer[i] = onp.array([*self.obs, a, r, *obs2, float(done)])
 
-            obs = obs2 
-            if done: break 
+            self.obs = obs2 
+            if done: 
+                self.obs = self.env.reset()
+                break 
         
         v_buffer = v_buffer[:i+1]
         obs, a, r, obs2, done = onp.split(v_buffer, [obs_dim, obs_dim+1, obs_dim+2, obs_dim*2+2], axis=-1)
@@ -151,33 +152,47 @@ optim = optax.chain(
 opt_state = optim.init(params)
 
 n_envs = 16
-worker = Worker.remote()
+n_steps = 5 
+print(f'[LOGGER] using batchsize = {n_envs * n_steps}')
+
+workers = [Worker.remote() for _ in range(n_envs)]
 
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm 
 import cloudpickle
 
 writer = SummaryWriter(comment=f'{env_name}_n-envs{n_envs}_seed{seed}')
+max_reward = -float('inf')
 
 import pathlib 
 model_path = pathlib.Path(f'./models/a2c/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
 
 for step_i in tqdm(range(1000)):
-    rollouts = ray.get([worker.rollout.remote(params) for _ in range(n_envs)])
+    rollouts = ray.get([worker.rollout.remote(params, n_steps) for worker in workers])
     samples = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
 
     loss, ploss, vloss, opt_state, params, grads = a2c_step(samples, params, opt_state)
     writer.add_scalar('loss/policy', ploss.item(), step_i)
     writer.add_scalar('loss/critic', vloss.item(), step_i)
     writer.add_scalar('loss/total', loss.item(), step_i)
+    writer.add_scalar('loss/batch_size', samples[0].shape[0], step_i)
+
+    obs, a, r, done, _ = samples 
+    a_probs, v_s = jax.vmap(lambda o: pv_frwd(params, o))(obs)
+    mean_entropy = jax.vmap(lambda p: Categorical(p).entropy())(a_probs).mean()
+    mean_value = v_s.mean()
+    writer.add_scalar('policy/mean_entropy', mean_entropy.item(), step_i)
+    writer.add_scalar('critic/mean_value', mean_value.item(), step_i)
 
     eval_r = eval(params, env)
     writer.add_scalar('rollout/eval_reward', eval_r, step_i)
 
-    if step_i == 0 or eval_r > max_reward: 
+    if eval_r > max_reward: 
         max_reward = eval_r
-        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+        model_save_path = str(model_path/f'params_{max_reward:.2f}')
+        print(f'saving model to... {model_save_path}')
+        with open(model_save_path, 'wb') as f: 
             cloudpickle.dump(params, f) 
 
 #%%

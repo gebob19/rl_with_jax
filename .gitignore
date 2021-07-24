@@ -6,6 +6,7 @@ baselines/
 *.rar
 *.pdf
 *.db
+**events.out.tf**
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
