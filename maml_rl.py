@@ -7,11 +7,13 @@ import optax
 import gym 
 from functools import partial
 import ray 
+import pybullet_envs
 
 ray.init()
 
 #%%
-env_name = 'Pendulum-v0'
+# env_name = 'Pendulum-v0'
+env_name = 'HalfCheetahBulletEnv-v0'
 env = gym.make(env_name)
 
 n_actions = env.action_space.shape[0]
@@ -140,6 +142,7 @@ class Worker:
         self.v_frwd = jax.jit(critic_fcn.apply)
 
         self.buffer = Vector_ReplayBuffer(1e6)
+        import pybullet_envs
         self.env = gym.make(env_name)
         self.obs = self.env.reset()
 
@@ -197,7 +200,7 @@ batch_size = 32
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = 200
+n_step_rollout = 100 #env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -218,16 +221,17 @@ v_optim = optimizer(v_lr)
 p_opt_state = p_optim.init(p_params)
 v_opt_state = v_optim.init(v_params)
 
-#%%
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'ppo_multi{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
+# #%%
+# from torch.utils.tensorboard import SummaryWriter
+# writer = SummaryWriter(comment=f'ppo_multi{n_envs}_{exp_name}_seed={seed}')
 
 #%%
 workers = [Worker.remote(n_step_rollout) for _ in range(n_envs)]
 
 step_i = 0 
-from tqdm import tqdm 
-pbar = tqdm(total=max_n_steps)
+# from tqdm import tqdm 
+# pbar = tqdm(total=max_n_steps)
+
 while step_i < max_n_steps:
     ## rollout
     rng, *subkeys = jax.random.split(rng, 1+n_envs)
@@ -236,20 +240,19 @@ while step_i < max_n_steps:
     rollouts = [r[0] for r in rollouts] # rollout data
     rollout = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
 
-    writer.add_scalar('rollout/mean_reward', onp.mean(rollout_r), step_i)
-    writer.add_scalar('rollout/max_reward', max(rollout_r), step_i)
-    writer.add_scalar('rollout/min_reward', min(rollout_r), step_i)
+    break 
 
-    ## update
-    total_loss = 0 
-    for batch in rollout2batches(rollout, batch_size):
-        loss, p_params, v_params, p_opt_state, v_opt_state = \
-            ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch)
-        total_loss += loss
-        step_i += 1 
-        pbar.update(1)
-    writer.add_scalar('loss/loss', total_loss.item(), step_i)
+#%%
+## maml inner step = rollout and update PPO -> compute loss
+## maml outter step = normal ? 
 
+#%%
+(obs, a, old_log_prob, v_target, advantages) = rollout
+
+#%%
+obs.shape
+
+#%%
 #%%
 #%%
 #%%

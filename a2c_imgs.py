@@ -40,7 +40,7 @@ env = gym.make(env_name)
 env = FireResetEnv(env)
 env = NoopResetEnv(env, noop_max=50)
 env = WarpFrame(env)
-env = ScaledFloatFrame(env)
+# env = ScaledFloatFrame(env)
 env = DiffFrame(env)
 # env = FlattenObs(env)
 
@@ -52,6 +52,7 @@ obs.shape
 obs = env.reset()
 for _ in range(20):
     obs, _, done, _ = env.step(env.action_space.sample())
+    plt.title(f'{obs.max()}, {obs.min()}')
     plt.imshow(obs)
     plt.show()
     if done: break 
