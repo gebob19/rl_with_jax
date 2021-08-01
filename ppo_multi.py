@@ -7,11 +7,13 @@ import optax
 import gym 
 from functools import partial
 import ray 
+import pybullet_envs
 
 ray.init()
 
 #%%
-env_name = 'Pendulum-v0'
+# env_name = 'Pendulum-v0'
+env_name = 'HalfCheetahBulletEnv-v0'
 env = gym.make(env_name)
 
 n_actions = env.action_space.shape[0]
@@ -74,6 +76,22 @@ critic_fcn = hk.without_apply_rng(critic_fcn)
 v_frwd = jax.jit(critic_fcn.apply)
 
 #%%
+def eval(params, env, rng):
+    rewards = 0 
+    obs = env.reset()
+    while True: 
+        mu, sig = p_frwd(params, obs)
+        rng, subrng = jax.random.split(rng)
+        dist = distrax.MultivariateNormalDiag(mu, sig)
+        a = dist.sample(seed=subrng)
+        a = np.clip(a, a_low, a_high)
+
+        obs2, r, done, _ = env.step(a)        
+        obs = obs2 
+        rewards += r
+        if done: break 
+    return rewards
+
 def rollout2batches(rollout, batch_size):
     rollout_len = rollout[0].shape[0]
     n_chunks = rollout_len // batch_size
@@ -140,6 +158,7 @@ class Worker:
         self.v_frwd = jax.jit(critic_fcn.apply)
 
         self.buffer = Vector_ReplayBuffer(1e6)
+        import pybullet_envs
         self.env = gym.make(env_name)
         self.obs = self.env.reset()
 
@@ -186,7 +205,7 @@ class Worker:
         log_prob = jax.lax.stop_gradient(log_prob)
         rollout = (obs, a, log_prob, v_target, advantages)
         
-        return (rollout, r.sum())
+        return rollout
 
 #%%
 seed = onp.random.randint(1e5)
@@ -197,7 +216,7 @@ batch_size = 32
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = 200
+n_step_rollout = env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -220,7 +239,7 @@ v_opt_state = v_optim.init(v_params)
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'ppo_multi{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
+writer = SummaryWriter(comment=f'ppo_multi2_{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
 
 #%%
 workers = [Worker.remote(n_step_rollout) for _ in range(n_envs)]
@@ -230,15 +249,9 @@ from tqdm import tqdm
 pbar = tqdm(total=max_n_steps)
 while step_i < max_n_steps:
     ## rollout
-    rng, *subkeys = jax.random.split(rng, 1+n_envs)
+    rng, *subkeys = jax.random.split(rng, 1+n_envs+1) # +1 for eval rollout
     rollouts = ray.get([workers[i].rollout.remote(p_params, v_params, subkeys[i]) for i in range(n_envs)])
-    rollout_r = [r[-1] for r in rollouts] # reward info 
-    rollouts = [r[0] for r in rollouts] # rollout data
     rollout = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
-
-    writer.add_scalar('rollout/mean_reward', onp.mean(rollout_r), step_i)
-    writer.add_scalar('rollout/max_reward', max(rollout_r), step_i)
-    writer.add_scalar('rollout/min_reward', min(rollout_r), step_i)
 
     ## update
     total_loss = 0 
@@ -249,6 +262,9 @@ while step_i < max_n_steps:
         step_i += 1 
         pbar.update(1)
     writer.add_scalar('loss/loss', total_loss.item(), step_i)
+
+    reward = eval(p_params, env, subkeys[-1])
+    writer.add_scalar('eval/total_reward', reward.item(), step_i)
 
 #%%
 #%%
