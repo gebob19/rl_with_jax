@@ -9,12 +9,14 @@ from functools import partial
 # from env import Navigation2DEnv
 from jax_env import Navigation2DEnvJAX
 import cloudpickle
+import pathlib 
 
 from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
 #%%
+env_name = 'Navigation2D'
 env = Navigation2DEnvJAX() # maml debug env 
 
 n_actions = env.action_space.shape[0]
@@ -170,6 +172,9 @@ v_opt_state = v_optim.init(v_params)
 p_optim_func = get_optim_fcn(p_optim)
 v_optim_func = get_optim_fcn(v_optim)
 
+model_path = pathlib.Path(f'./models/maml/{env_name}')
+model_path.mkdir(exist_ok=True, parents=True)
+
 #%%
 buffer = Vector_ReplayBuffer(max_n_steps)
 
@@ -296,9 +301,9 @@ def maml_eval(env, params, rng, n_steps=1):
 
     return rewards
 
-# #%%
-# from torch.utils.tensorboard import SummaryWriter
-# writer = SummaryWriter(comment=f'maml_test3_seed={seed}')
+#%%
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(comment=f'maml_test3_seed={seed}')
 
 #%%
 from tqdm import tqdm 
@@ -316,7 +321,7 @@ for e in tqdm(range(1, epochs+1)):
         rng, subkey = jax.random.split(rng, 2)
         loss, grads = jax.value_and_grad(maml_loss)(params, env, subkey)
         
-        # writer.add_scalar('loss/loss', loss.item(), step_count)
+        writer.add_scalar('loss/loss', loss.item(), step_count)
         gradients.append(grads)
         step_count += 1 
         
@@ -338,6 +343,10 @@ for e in tqdm(range(1, epochs+1)):
         for i, r in enumerate(rewards):
             writer.add_scalar(f'reward/{i}step', r, e)
 
+        if e == 10 or rewards[1] > max_reward: 
+            max_reward = rewards[1] # eval on single grad step 
+            with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+                cloudpickle.dump((p_params, v_params), f)
 
 #%%
 #%%
