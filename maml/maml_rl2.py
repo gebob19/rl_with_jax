@@ -145,6 +145,8 @@ max_n_steps = 100
 task_batch_size = 40
 fast_batch_size = 20
 alpha = 0.5
+# eval 
+eval_every = 10 
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -332,20 +334,20 @@ for e in tqdm(range(1, epochs+1)):
     v_params, v_opt_state = v_optim_func(v_params, v_grad, v_opt_state)
 
     # eval 
-    if e % 1 == 0:
+    if e % eval_every == 0:
         rng, subkey = jax.random.split(rng, 2)
         eval_task = env.sample_tasks(1, subkey)[0]
         env.reset_task(eval_task)
 
         rng, subkey = jax.random.split(rng, 2)
-        rewards = maml_eval(env, (p_params, v_params), subkey, n_steps=2)
+        rewards = maml_eval(env, (p_params, v_params), subkey, n_steps=3)
 
         for i, r in enumerate(rewards):
             writer.add_scalar(f'reward/{i}step', r, e)
 
-        if e == 1 or rewards[1] > max_reward: 
+        if e == eval_every or rewards[1] > max_reward: 
             max_reward = rewards[1] # eval on single grad step 
-            save_path = str(model_path/f'params_{max_reward:.2f}')
+            save_path = str(model_path/f'params_e{e}_{max_reward:.2f}')
             print(f'saving model to {save_path}...')
             with open(save_path, 'wb') as f: 
                 cloudpickle.dump((p_params, v_params), f)
