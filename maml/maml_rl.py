@@ -6,10 +6,10 @@ import distrax
 import optax
 import gym 
 from functools import partial
-import ray 
 import pybullet_envs
 
-ray.init()
+# import ray 
+# ray.init()
 
 #%%
 # env_name = 'Pendulum-v0'
@@ -76,13 +76,40 @@ critic_fcn = hk.without_apply_rng(critic_fcn)
 v_frwd = jax.jit(critic_fcn.apply)
 
 #%%
+@jax.jit 
+def policy(params, obs, rng):
+    mu, sig = p_frwd(params, obs)
+    rng, subrng = jax.random.split(rng)
+    dist = distrax.MultivariateNormalDiag(mu, sig)
+    a = dist.sample(seed=subrng)
+    a = np.clip(a, a_low, a_high)
+    return a 
+
+def eval(params, env, rng):
+    rewards = 0 
+    obs = env.reset()
+    while True: 
+        rng, subkey = jax.random.split(rng, 2)
+        a = policy(params, obs, subkey)
+
+        obs2, r, done, _ = env.step(a)        
+        obs = obs2 
+        rewards += r
+        if done: break 
+    return rewards
+
+def shuffle_rollout(rollout):
+    rollout_len = rollout[0].shape[0]
+    idxs = onp.arange(rollout_len) 
+    onp.random.shuffle(idxs)
+    rollout = jax.tree_map(lambda x: x[idxs], rollout, is_leaf=lambda x: hasattr(x, 'shape'))
+    return rollout
+
 def rollout2batches(rollout, batch_size):
     rollout_len = rollout[0].shape[0]
     n_chunks = rollout_len // batch_size
     # shuffle / de-correlate
-    idxs = onp.arange(rollout_len) 
-    onp.random.shuffle(idxs)
-    rollout = jax.tree_map(lambda x: x[idxs], rollout, is_leaf=lambda x: hasattr(x, 'shape'))
+    rollout = shuffle_rollout(rollout)
     # batch 
     batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout, is_leaf=lambda x: hasattr(x, 'shape'))
     for i in range(n_chunks):
@@ -122,15 +149,13 @@ def ppo_loss(p_params, v_params, batch):
     return loss 
 
 @jax.jit
-def ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch):
-    loss, (p_grads, v_grads) = jax.value_and_grad(ppo_loss, argnums=[0,1])(p_params, v_params, batch)
+def ppo_step(p_params, v_params, p_opt_state, v_opt_state, p_grads, v_grads):
     p_params, p_opt_state = update_step(p_params, p_grads, p_optim, p_opt_state)
     v_params, v_opt_state = update_step(v_params, v_grads, v_optim, v_opt_state)
-    return loss, p_params, v_params, p_opt_state, v_opt_state
+    return (p_params, v_params), (p_opt_state, v_opt_state)
 
-@ray.remote
 class Worker:
-    def __init__(self, n_steps):
+    def __init__(self, make_env, n_steps):
         self.n_steps = n_steps
 
         policy_fcn = hk.transform(_policy_fcn)
@@ -143,8 +168,30 @@ class Worker:
 
         self.buffer = Vector_ReplayBuffer(1e6)
         import pybullet_envs
-        self.env = gym.make(env_name)
+        # self.env = gym.make(env_name)
+        self.env = make_env()
         self.obs = self.env.reset()
+        self.eval_env = make_env()
+
+    def eval(self, p_params, rng):
+        env = self.eval_env
+        obs = env.reset()
+        total_reward = 0 
+        while True: 
+            mu, sig = self.p_frwd(p_params, obs)
+
+            rng, subrng = jax.random.split(rng)
+            dist = distrax.MultivariateNormalDiag(mu, sig)
+            a = dist.sample(seed=subrng)
+            a = np.clip(a, a_low, a_high)
+            a = jax.lax.stop_gradient(a) # stop the trace!
+            
+            obs2, r, done, _ = env.step(a)
+            obs = obs2
+            total_reward += r 
+            if done: break 
+        
+        return total_reward
 
     def compute_advantages(self, v_params, rollout):
         (obs, _, r, obs2, done, _) = rollout
@@ -175,6 +222,10 @@ class Worker:
             a = np.clip(a, a_low, a_high)
             log_prob = dist.log_prob(a)
             
+            # stop the trace! 
+            a = jax.lax.stop_gradient(a)
+            log_prob = jax.lax.stop_gradient(log_prob)
+            
             obs2, r, done, _ = self.env.step(a)
 
             self.buffer.push((self.obs, a, r, obs2, done, log_prob))
@@ -186,21 +237,62 @@ class Worker:
         rollout = self.buffer.contents()
         advantages, v_target = self.compute_advantages(v_params, rollout)
         (obs, a, r, _, _, log_prob) = rollout
-        log_prob = jax.lax.stop_gradient(log_prob)
         rollout = (obs, a, log_prob, v_target, advantages)
         
-        return (rollout, r.sum())
+        return rollout
+
+@jax.jit
+def maml_inner(params, rollout):
+    p_params, v_params = params
+    p_g, v_g = jax.grad(ppo_loss, argnums=[0,1])(*params, rollout)
+
+    sgd_update = lambda lr: lambda param, grad: param - lr * grad
+    inner_params_p = jax.tree_multimap(sgd_update(policy_lr), p_params, p_g)
+    inner_params_v = jax.tree_multimap(sgd_update(v_lr), v_params, v_g)
+
+    return inner_params_p, inner_params_v
+
+def maml_outer(params, task_idx, rng):    
+    subkeys = jax.random.split(rng, 2) 
+    # inner update / meta train
+    rollout = workers[task_idx].rollout(*params, subkeys[0])
+    inner_params = maml_inner(params, rollout)
+
+    # meta test
+    eval_rollout = workers[task_idx].rollout(*inner_params, subkeys[-1])
+    loss = ppo_loss(*inner_params, eval_rollout)
+    return loss 
+
+def batch_maml_loss(params, rng):
+    task_idxs = onp.random.choice(onp.arange(len(tasks)), size=(task_batch_size,))
+    subkeys = jax.random.split(rng, task_batch_size) 
+    loss = 0 
+    for task_idx, subkey in zip(task_idxs, subkeys):
+        loss += maml_outer(params, task_idx, subkey)
+    loss /= task_batch_size
+    return loss 
+
+## task defn
+env_name = 'HalfCheetahBulletEnv-v0'
+def task_forwards():
+    env = gym.make(env_name)
+    return env 
+
+def task_backwards():
+    env = gym.make(env_name)
+    env.unwrapped.robot.walk_target_x = -1000.
+    return env 
 
 #%%
 seed = onp.random.randint(1e5)
-n_envs = 3
 gamma = 0.99 
 eps = 0.2
-batch_size = 32 
+task_batch_size = 2
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = 100 #env._max_episode_steps
+n_step_rollout = 200 #env._max_episode_steps
+n_steps_eval = 10000
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -221,37 +313,55 @@ v_optim = optimizer(v_lr)
 p_opt_state = p_optim.init(p_params)
 v_opt_state = v_optim.init(v_params)
 
-# #%%
-# from torch.utils.tensorboard import SummaryWriter
-# writer = SummaryWriter(comment=f'ppo_multi{n_envs}_{exp_name}_seed={seed}')
+#%%
+tasks = [task_forwards, task_backwards]
+workers = [Worker(task_fcn, n_step_rollout) for task_fcn in tasks]
 
 #%%
-workers = [Worker.remote(n_step_rollout) for _ in range(n_envs)]
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(comment=f'maml_test')
 
+#%%
 step_i = 0 
-# from tqdm import tqdm 
-# pbar = tqdm(total=max_n_steps)
 
+# pack 
+params = (p_params, v_params)
+opt_states = (p_opt_state, v_opt_state)
+
+from tqdm import tqdm 
+pbar = tqdm(total=max_n_steps)
 while step_i < max_n_steps:
-    ## rollout
-    rng, *subkeys = jax.random.split(rng, 1+n_envs)
-    rollouts = ray.get([workers[i].rollout.remote(p_params, v_params, subkeys[i]) for i in range(n_envs)])
-    rollout_r = [r[-1] for r in rollouts] # reward info 
-    rollouts = [r[0] for r in rollouts] # rollout data
-    rollout = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
+    # update 
+    rng, subkey = jax.random.split(rng, 2) 
+    loss, g_params = jax.value_and_grad(batch_maml_loss)(params, subkey)
+    params, opt_states = ppo_step(*params, *opt_states, *g_params)
 
-    break 
+    writer.add_scalar('loss/loss', loss.item(), step_i)
+    step_i += 1 
+
+    # eval 
+    if step_i % n_steps_eval == 0: 
+        print('evaluating...')
+        task_ids = np.arange(len(tasks))
+        for task_idx in task_ids: 
+            rng, sk1, sk2, sk3 = jax.random.split(rng, 4) 
+
+            # eval without any step
+            total_reward_step0 = workers[task_idx].eval(params[0], sk3)
+
+            # step 
+            rollout = workers[task_idx].rollout(*params, sk1)
+            inner_params = maml_inner(params, rollout)
+            # eval with one step 
+            total_reward_step1 = workers[task_idx].eval(inner_params[0], sk2)
+
+            writer.add_scalar(f'tasks/task{task_idx}_rstep0', total_reward_step0, step_i)
+            writer.add_scalar(f'tasks/task{task_idx}_rstep1', total_reward_step1, step_i)
 
 #%%
-## maml inner step = rollout and update PPO -> compute loss
-## maml outter step = normal ? 
-
 #%%
-(obs, a, old_log_prob, v_target, advantages) = rollout
-
 #%%
-obs.shape
-
+#%%
 #%%
 #%%
 #%%

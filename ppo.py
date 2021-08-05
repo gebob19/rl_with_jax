@@ -23,27 +23,27 @@ assert -a_high == a_low
 #%%
 import haiku as hk
 
-def _policy_fcn(s):
-    policy = hk.Sequential([
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(2*n_actions), 
-    ])
-    x = policy(s)
-    mu, sig = x[:n_actions], x[n_actions:]
-    mu = np.tanh(mu) * a_high
-    sig = jax.nn.softplus(sig)
-    return mu, sig
-
 # def _policy_fcn(s):
-#     log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
-#     mu = hk.Sequential([
+#     policy = hk.Sequential([
 #         hk.Linear(64), jax.nn.relu,
 #         hk.Linear(64), jax.nn.relu,
-#         hk.Linear(n_actions), np.tanh 
-#     ])(s) * a_high
-#     sig = np.exp(log_std)
+#         hk.Linear(2*n_actions), 
+#     ])
+#     x = policy(s)
+#     mu, sig = x[:n_actions], x[n_actions:]
+#     mu = np.tanh(mu) * a_high
+#     sig = jax.nn.softplus(sig)
 #     return mu, sig
+
+def _policy_fcn(s):
+    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
+    mu = hk.Sequential([
+        hk.Linear(64), jax.nn.relu,
+        hk.Linear(64), jax.nn.relu,
+        hk.Linear(n_actions), np.tanh 
+    ])(s) * a_high
+    sig = np.exp(log_std)
+    return mu, sig
 
 def _critic_fcn(s):
     v = hk.Sequential([
