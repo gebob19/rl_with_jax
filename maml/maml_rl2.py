@@ -296,9 +296,9 @@ def maml_eval(env, params, rng, n_steps=1):
 
     return rewards
 
-#%%
-from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'maml_test3_seed={seed}')
+# #%%
+# from torch.utils.tensorboard import SummaryWriter
+# writer = SummaryWriter(comment=f'maml_test3_seed={seed}')
 
 #%%
 from tqdm import tqdm 
@@ -316,11 +316,11 @@ for e in tqdm(range(1, epochs+1)):
         rng, subkey = jax.random.split(rng, 2)
         loss, grads = jax.value_and_grad(maml_loss)(params, env, subkey)
         
-        writer.add_scalar('loss/loss', loss.item(), step_count)
+        # writer.add_scalar('loss/loss', loss.item(), step_count)
         gradients.append(grads)
         step_count += 1 
-
-    grad = jax.tree_multimap(lambda *x: onp.mean(x), *gradients)
+        
+    grad = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
 
     p_grad, v_grad = grad
     p_params, p_opt_state = p_optim_func(p_params, p_grad, p_opt_state)
@@ -338,7 +338,7 @@ for e in tqdm(range(1, epochs+1)):
         for i, r in enumerate(rewards):
             writer.add_scalar(f'reward/{i}step', r, e)
 
-#%%
+
 #%%
 #%%
 #%%
