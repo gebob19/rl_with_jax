@@ -168,7 +168,7 @@ def ddpg_step(params, opt_states, batch):
     grads = (p_grad, q_grad)
     return params, opt_states, losses, grads
 
-def eval(p_params, env, name, max_step, mp4=True):
+def eval(p_params, env, name, max_step, mp4=True, save=True):
     rewards = 0 
     imgs = []
     obs = env.reset()
@@ -182,19 +182,20 @@ def eval(p_params, env, name, max_step, mp4=True):
         rewards += r
         if done: break 
 
-    print(f'writing len {len(imgs)} total reward {rewards}...')
-    if mp4: 
-        print('... as .mp4')
-        h, w, _ = imgs[0].shape
-        fourcc = cv2.VideoWriter_fourcc(*'XVID')
-        video = cv2.VideoWriter(f'{name}_{rewards:.2f}.mp4', fourcc, 20, (w, h))
-        for img in imgs:
-            video.write(img)
-        cv2.destroyAllWindows()
-        video.release()
-    else:
-        print('... as .png')
-        write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
+    if save: 
+        print(f'writing len {len(imgs)} total reward {rewards}...')
+        if mp4: 
+            print('... as .mp4')
+            h, w, _ = imgs[0].shape
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')
+            video = cv2.VideoWriter(f'{name}_{rewards:.2f}.mp4', fourcc, 20, (w, h))
+            for img in imgs:
+                video.write(img)
+            cv2.destroyAllWindows()
+            video.release()
+        else:
+            print('... as .png')
+            write_apng(f'{name}_{rewards:.2f}.png', imgs, delay=20)
 
     return imgs, rewards
 
@@ -247,8 +248,13 @@ q_fcn = hk.without_apply_rng(q_fcn)
 q_frwd = jax.jit(q_fcn.apply)
 
 ## optimizers 
-p_optim = optax.adam(policy_lr)
-q_optim = optax.adam(q_lr)
+optimizer = lambda lr: optax.chain(
+    optax.clip_by_global_norm(0.5),
+    optax.scale_by_adam(),
+    optax.scale(-lr),
+)
+p_optim = optimizer(policy_lr)
+q_optim = optimizer(q_lr)
 
 model_path = pathlib.Path(f'./models/ddpg_td3/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
@@ -334,13 +340,32 @@ while step_i < total_n_steps:
 
 pbar.close()
 
-# # %%
-# ppath = str(model_path/f'params_2075.77')
-# # ppath = 'models/ddpg_td3/params_854.89'
+# %%
+ppath = str(model_path/f'params_2220.22')
+# ppath = 'models/ddpg_td3/params_854.89'
 
 # with open(ppath, 'rb') as f: 
 #     p_params, q_params = cloudpickle.load(f)
 
 # imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)#int(1e3))
 
-# # %%
+# %%
+rewards = []
+velocity = []
+obs = env.reset()
+while True: 
+    a = p_frwd(p_params, obs)
+    obs2, r, done, _ = env.step(a)        
+    obs = obs2 
+    rewards.append(r)
+    v = np.linalg.norm(env.unwrapped.robot_body.speed())
+    velocity.append(v)
+    if done: break 
+
+# %%
+plt.plot(rewards, label='env_rewards')
+plt.plot(velocity, label='velocity')
+plt.legend()
+
+# %%
+# %%

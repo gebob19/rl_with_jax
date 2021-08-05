@@ -109,6 +109,7 @@ def main(_):
             'reward/total': sum(rewards),
         }
 
+        # rewards to go 
         gamma = 0.99
         for i in range(len(rewards) - 1)[::-1]:
             rewards[i] = rewards[i] + gamma * rewards[i+1]

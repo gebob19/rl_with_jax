@@ -7,6 +7,10 @@ import optax
 import gym 
 from functools import partial
 
+from jax.config import config
+config.update("jax_enable_x64", True) 
+config.update("jax_debug_nans", True) # break on nans
+
 #%%
 env_name = 'CartPole-v0'
 env = gym.make(env_name)
@@ -14,54 +18,80 @@ env = gym.make(env_name)
 n_actions = env.action_space.n 
 obs_dim = env.observation_space.shape[0]
 
-# n_actions = env.action_space.shape[0]
-# obs_dim = env.observation_space.shape[0]
-
-# a_high = env.action_space.high[0]
-# a_low = env.action_space.low[0]
-
-# print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
-# assert -a_high == a_low
-
 #%%
 import haiku as hk 
 
 def _policy_fcn(obs):
-    probs = hk.Sequential([
+    a_probs = hk.Sequential([
         hk.Linear(32), jax.nn.relu,
         hk.Linear(32), jax.nn.relu,
-        hk.Linear(n_actions), jax.nn.softmax,
+        hk.Linear(n_actions), jax.nn.softmax
     ])(obs)
-    return probs 
+    return a_probs 
 
 policy_fcn = hk.transform(_policy_fcn)
 policy_fcn = hk.without_apply_rng(policy_fcn)
 p_frwd = jax.jit(policy_fcn.apply)
 
-class Vector_ReplayBuffer:
-    def __init__(self, buffer_capacity):
-        self.buffer_capacity = buffer_capacity = int(buffer_capacity)
-        self.i = 0
-        # obs, obs2, a, r, done
-        self.splits = [obs_dim, obs_dim+1, obs_dim+1+1, obs_dim*2+1+1, obs_dim*2+1+1+1]
-        self.clear()
+@jax.jit
+def update_step(params, grads, opt_state):
+    grads, opt_state = p_optim.update(grads, opt_state)
+    params = optax.apply_updates(params, grads)
+    return params, opt_state
 
-    def push(self, sample):
-        assert self.i < self.buffer_capacity # dont let it get full
-        (obs, a, r, obs2, done, log_prob) = sample
-        self.buffer[self.i] = onp.array([*obs, onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
-        self.i += 1 
+def reward2go(r, gamma=0.99):
+    for i in range(len(r) - 1)[::-1]:
+        r[i] = r[i] + gamma * r[i+1]
+    r = (r - r.mean()) / (r.std() + 1e-8)
+    return r 
 
-    def contents(self):
-        return onp.split(self.buffer[:self.i], self.splits, axis=-1)
+@jax.jit    
+def policy(p_params, obs, rng):
+    a_probs = p_frwd(p_params, obs)
+    a = distrax.Categorical(probs=a_probs).sample(seed=rng)        
+    return a
 
-    def clear(self):
-        self.i = 0 
-        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + 1 + 2 + 1))
+def rollout(p_params, rng):
+    global step_count
+    
+    observ, action, rew = [], [], []
+    obs = env.reset()
+    while True: 
+        rng, subkey = jax.random.split(rng, 2) 
+        a = policy(p_params, obs, subkey).item()
 
-#%%
+        obs2, r, done, _ = env.step(a)
+        step_count += 1
+        pbar.update(1)
+
+        observ.append(obs)
+        action.append(a)
+        rew.append(r)
+
+        if done: break
+        obs = obs2
+
+    obs = np.stack(observ)
+    a = np.stack(action)
+    r = onp.stack(rew) # 
+
+    return obs, a, r 
+
+def reinforce_loss(p_params, obs, a, r):
+    a_probs = p_frwd(p_params, obs)
+    log_prob = distrax.Categorical(probs=a_probs).log_prob(a.astype(int))
+    loss = -(log_prob * r).sum()
+    return loss 
+
+from functools import partial
+def batch_reinforce_loss(params, batch):
+    return jax.vmap(partial(reinforce_loss, params))(*batch).sum()
+
+# %%
 seed = onp.random.randint(1e5)
 policy_lr = 1e-3
+batch_size = 64 
+max_n_steps = 100000
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -70,58 +100,44 @@ obs = env.reset() # dummy input
 p_params = policy_fcn.init(rng, obs) 
 
 ## optimizers 
-optimizer = lambda lr: optax.chain(
-    optax.clip_by_global_norm(0.5),
-    optax.scale_by_adam(),
-    optax.scale(-lr),
-)
-p_optim = optimizer(policy_lr)
+# optimizer = lambda lr: optax.chain(
+#     optax.clip_by_global_norm(0.5),
+#     optax.scale_by_adam(),
+#     optax.scale(-lr),
+# )
+# p_optim = optimizer(policy_lr)
+
+p_optim = optax.sgd(policy_lr)
 p_opt_state = p_optim.init(p_params)
 
-buffer = Vector_ReplayBuffer(500)
-
-#%%
-def reward2go(r, gamma=0.99):
-    for i in range(len(r) - 1)[::-1]:
-        r[i] = r[i] + gamma * r[i+1]
-    r = (r - r.mean()) / r.std()
-    return r 
-
-def rollout(p_params, rng):
-    buffer.clear()
-    obs = env.reset()
-    while True: 
-        probs = p_frwd(p_params, obs)
-
-        rng, subkey = jax.random.split(rng, 2)
-        dist = distrax.Categorical(probs)
-        a = dist.sample(seed=subkey).item()
-
-        obs2, r, done, _ = env.step(a)        
-        obs = obs2 
-
-        buffer.push((obs, a, r, obs2, done, 0))
-        if done: break 
-    
-    (obs, a, r, obs2, done, _) = buffer.contents()
-
-    return (obs, a, r)
-
-def policy_loss(p_params, batch):
-    (obs, a, r) = batch
-    probs = p_frwd(p_params, obs)
-    dist = distrax.Categorical(probs)
-    log_prob = dist.log_prob(a)
-
-    loss = -(log_prob * r).sum()
-    return loss 
+# %%
+from torch.utils.tensorboard import SummaryWriter
+writer = SummaryWriter(comment=f'reinforce_{env_name}_seed={seed}')
 
 # %%
-rng, subkey = jax.random.split(rng, 2)
-(obs, a, r) = rollout(p_params, subkey)
-r = reward2go(r)
+from tqdm import tqdm 
 
-# %%
+step_count = 0
+epi_i = 0 
+
+pbar = tqdm(total=max_n_steps)
+gradients = []
+loss_grad_fcn = jax.jit(jax.value_and_grad(batch_reinforce_loss))
+
+while step_count < max_n_steps: 
+    rng, subkey = jax.random.split(rng, 2) 
+    obs, a, r = rollout(p_params, subkey)
+    writer.add_scalar('rollout/reward', r.sum().item(), epi_i)
+    r = reward2go(r)
+    loss, grad = loss_grad_fcn(p_params, (obs, a, r))
+
+    writer.add_scalar('loss/loss', loss.item(), step_count)
+    gradients.append(grad)
+
+    epi_i += 1
+    if epi_i % batch_size == 0:
+        grad = jax.tree_multimap(lambda *x: sum(x), *gradients)
+        p_params, p_opt_state = update_step(p_params, grad, p_opt_state)
 
 # %%
 # %%

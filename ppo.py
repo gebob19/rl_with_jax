@@ -1,19 +1,14 @@
 #%%
-import jax
+import jax 
 import jax.numpy as np 
 import numpy as onp 
 import distrax 
 import optax
 import gym 
 from functools import partial
-import ray 
-import pybullet_envs
-
-ray.init()
 
 #%%
-# env_name = 'Pendulum-v0'
-env_name = 'HalfCheetahBulletEnv-v0'
+env_name = 'Pendulum-v0'
 env = gym.make(env_name)
 
 n_actions = env.action_space.shape[0]
@@ -27,6 +22,18 @@ assert -a_high == a_low
 
 #%%
 import haiku as hk
+
+# def _policy_fcn(s):
+#     policy = hk.Sequential([
+#         hk.Linear(64), jax.nn.relu,
+#         hk.Linear(64), jax.nn.relu,
+#         hk.Linear(2*n_actions), 
+#     ])
+#     x = policy(s)
+#     mu, sig = x[:n_actions], x[n_actions:]
+#     mu = np.tanh(mu) * a_high
+#     sig = jax.nn.softplus(sig)
+#     return mu, sig
 
 def _policy_fcn(s):
     log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
@@ -75,23 +82,7 @@ critic_fcn = hk.transform(_critic_fcn)
 critic_fcn = hk.without_apply_rng(critic_fcn)
 v_frwd = jax.jit(critic_fcn.apply)
 
-#%%
-def eval(params, env, rng):
-    rewards = 0 
-    obs = env.reset()
-    while True: 
-        mu, sig = p_frwd(params, obs)
-        rng, subrng = jax.random.split(rng)
-        dist = distrax.MultivariateNormalDiag(mu, sig)
-        a = dist.sample(seed=subrng)
-        a = np.clip(a, a_low, a_high)
-
-        obs2, r, done, _ = env.step(a)        
-        obs = obs2 
-        rewards += r
-        if done: break 
-    return rewards
-
+# %%
 def rollout2batches(rollout, batch_size):
     rollout_len = rollout[0].shape[0]
     n_chunks = rollout_len // batch_size
@@ -105,10 +96,23 @@ def rollout2batches(rollout, batch_size):
         batch = [d[i] for d in batched_rollout]
         yield batch 
 
-def update_step(params, grads, optim, opt_state):
-    grads, opt_state = optim.update(grads, opt_state)
-    params = optax.apply_updates(params, grads)
-    return params, opt_state
+@jax.jit
+def compute_advantages(v_params, rollout):
+    (obs, _, r, obs2, done, _) = rollout
+    r = (r - r.mean()) / (r.std() + 1e-10) # normalize
+    
+    batch_v_fcn = jax.vmap(partial(v_frwd, v_params))
+    v_obs = batch_v_fcn(obs)
+    v_obs2 = batch_v_fcn(obs2)
+
+    v_target = r + (1 - done) * gamma * v_obs2
+    advantages = v_target - v_obs
+    advantages = jax.lax.stop_gradient(advantages)
+    v_target = jax.lax.stop_gradient(v_target)
+    
+    # normalize 
+    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
+    return advantages, v_target
 
 @jax.jit
 def ppo_loss(p_params, v_params, batch):
@@ -137,6 +141,11 @@ def ppo_loss(p_params, v_params, batch):
 
     return loss 
 
+def update_step(params, grads, optim, opt_state):
+    grads, opt_state = optim.update(grads, opt_state)
+    params = optax.apply_updates(params, grads)
+    return params, opt_state
+
 @jax.jit
 def ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch):
     loss, (p_grads, v_grads) = jax.value_and_grad(ppo_loss, argnums=[0,1])(p_params, v_params, batch)
@@ -144,79 +153,13 @@ def ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch):
     v_params, v_opt_state = update_step(v_params, v_grads, v_optim, v_opt_state)
     return loss, p_params, v_params, p_opt_state, v_opt_state
 
-@ray.remote
-class Worker:
-    def __init__(self, n_steps):
-        self.n_steps = n_steps
-
-        policy_fcn = hk.transform(_policy_fcn)
-        policy_fcn = hk.without_apply_rng(policy_fcn)
-        self.p_frwd = jax.jit(policy_fcn.apply)
-
-        critic_fcn = hk.transform(_critic_fcn)
-        critic_fcn = hk.without_apply_rng(critic_fcn)
-        self.v_frwd = jax.jit(critic_fcn.apply)
-
-        self.buffer = Vector_ReplayBuffer(1e6)
-        import pybullet_envs
-        self.env = gym.make(env_name)
-        self.obs = self.env.reset()
-
-    def compute_advantages(self, v_params, rollout):
-        (obs, _, r, obs2, done, _) = rollout
-        r = (r - r.mean()) / (r.std() + 1e-10) # normalize
-        
-        batch_v_fcn = jax.vmap(partial(self.v_frwd, v_params))
-        v_obs = batch_v_fcn(obs)
-        v_obs2 = batch_v_fcn(obs2)
-
-        v_target = r + (1 - done) * 0.99 * v_obs2
-        advantages = v_target - v_obs
-        advantages = jax.lax.stop_gradient(advantages)
-        v_target = jax.lax.stop_gradient(v_target)
-        
-        # normalize 
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
-        return advantages, v_target
-
-    def rollout(self, p_params, v_params, rng):
-        self.buffer.clear()
-        
-        for _ in range(self.n_steps): # rollout 
-            mu, sig = self.p_frwd(p_params, self.obs)
-
-            rng, subrng = jax.random.split(rng)
-            dist = distrax.MultivariateNormalDiag(mu, sig)
-            a = dist.sample(seed=subrng)
-            a = np.clip(a, a_low, a_high)
-            log_prob = dist.log_prob(a)
-            
-            obs2, r, done, _ = self.env.step(a)
-
-            self.buffer.push((self.obs, a, r, obs2, done, log_prob))
-            self.obs = obs2
-            if done: 
-                self.obs = self.env.reset()
-
-        # update rollout contents 
-        rollout = self.buffer.contents()
-        advantages, v_target = self.compute_advantages(v_params, rollout)
-        (obs, a, r, _, _, log_prob) = rollout
-        log_prob = jax.lax.stop_gradient(log_prob)
-        rollout = (obs, a, log_prob, v_target, advantages)
-        
-        return rollout
-
 #%%
 seed = onp.random.randint(1e5)
-n_envs = 3
 gamma = 0.99 
 eps = 0.2
 batch_size = 32 
 policy_lr = 1e-3
 v_lr = 1e-3
-max_n_steps = 1e6
-n_step_rollout = env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -224,6 +167,7 @@ onp.random.seed(seed)
 obs = env.reset() # dummy input 
 p_params = policy_fcn.init(rng, obs) 
 v_params = critic_fcn.init(rng, obs) 
+buffer = Vector_ReplayBuffer(1e6)
 
 ## optimizers 
 optimizer = lambda lr: optax.chain(
@@ -239,33 +183,51 @@ v_opt_state = v_optim.init(v_params)
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'ppo_multi2_{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
+writer = SummaryWriter(comment=f'ppo_{env_name}_seed={seed}')
 
-#%%
-workers = [Worker.remote(n_step_rollout) for _ in range(n_envs)]
-
-step_i = 0 
+env_step = 0 
 from tqdm import tqdm 
-pbar = tqdm(total=max_n_steps)
-while step_i < max_n_steps:
-    ## rollout
-    rng, *subkeys = jax.random.split(rng, 1+n_envs+1) # +1 for eval rollout
-    rollouts = ray.get([workers[i].rollout.remote(p_params, v_params, subkeys[i]) for i in range(n_envs)])
-    rollout = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
+for epi_i in tqdm(range(500)):
+    total_reward = 0 
+    obs = env.reset()
 
-    ## update
+    buffer.clear()
+    while True: # rollout 
+        mu, sig = p_frwd(p_params, obs)
+
+        rng, subrng = jax.random.split(rng)
+        dist = distrax.MultivariateNormalDiag(mu, sig)
+        a = dist.sample(seed=subrng)
+        a = np.clip(a, a_low, a_high)
+        log_prob = dist.log_prob(a)
+        
+        writer.add_scalar('policy/entropy', dist.entropy().item(), env_step)
+        env_step += 1 
+
+        obs2, r, done, _ = env.step(a)
+        total_reward += r
+
+        buffer.push((obs, a, r, obs2, done, log_prob))
+        obs = obs2
+        if done: break
+
+    writer.add_scalar('rollout/reward', total_reward.item(), epi_i)
+    rollout = buffer.contents()
+    advantages, v_target = compute_advantages(v_params, rollout)
+    # update rollout contents 
+    (obs, a, _, _, _, log_prob) = rollout
+    log_prob = jax.lax.stop_gradient(log_prob)
+    rollout = (obs, a, log_prob, v_target, advantages)
+
+    rollout_length = obs.shape[0]
+    writer.add_scalar('rollout/length', rollout_length, epi_i)
+
     total_loss = 0 
     for batch in rollout2batches(rollout, batch_size):
         loss, p_params, v_params, p_opt_state, v_opt_state = \
             ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch)
         total_loss += loss
-        step_i += 1 
-        pbar.update(1)
-    writer.add_scalar('loss/loss', total_loss.item(), step_i)
+    writer.add_scalar('loss/loss', total_loss.item(), epi_i)
+    # writer.add_scalar('policy/log_std', p_params['~']['log_std'].item(), epi_i)
 
-    reward = eval(p_params, env, subkeys[-1])
-    writer.add_scalar('eval/total_reward', reward.item(), step_i)
-
-#%%
-#%%
-#%%
+# %%
