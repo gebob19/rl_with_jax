@@ -332,7 +332,7 @@ for e in tqdm(range(1, epochs+1)):
     v_params, v_opt_state = v_optim_func(v_params, v_grad, v_opt_state)
 
     # eval 
-    if e % 10 == 0:
+    if e % 1 == 0:
         rng, subkey = jax.random.split(rng, 2)
         eval_task = env.sample_tasks(1, subkey)[0]
         env.reset_task(eval_task)
@@ -343,9 +343,11 @@ for e in tqdm(range(1, epochs+1)):
         for i, r in enumerate(rewards):
             writer.add_scalar(f'reward/{i}step', r, e)
 
-        if e == 10 or rewards[1] > max_reward: 
+        if e == 1 or rewards[1] > max_reward: 
             max_reward = rewards[1] # eval on single grad step 
-            with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            save_path = str(model_path/f'params_{max_reward:.2f}')
+            print(f'saving model to {save_path}...')
+            with open(save_path, 'wb') as f: 
                 cloudpickle.dump((p_params, v_params), f)
 
 #%%
