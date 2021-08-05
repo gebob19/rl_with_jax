@@ -8,6 +8,13 @@ import jax.numpy as np
 import jax  
 from functools import partial
 
+@jax.jit
+def compute_reward_done(state, goal):
+    diff = state - goal
+    reward = -np.sqrt((diff**2).sum())
+    done = (np.abs(diff) < 0.01).sum() == 2
+    return reward, done
+
 class Navigation2DEnvJAX(gym.Env):
     """2D navigation problems, as described in [1]. The code is adapted from 
     https://github.com/cbfinn/maml_rl/blob/9c8e2ebd741cb0c7b8bf2d040c4caeeb8e06cc95/maml_examples/point_env_randgoal.py
@@ -47,49 +54,64 @@ class Navigation2DEnvJAX(gym.Env):
         self._state = np.zeros(2, dtype=np.float32)
         return self._state
 
-    @partial(jax.jit, static_argnums=(0,))
     def step(self, action):
         action = np.clip(action, -0.1, 0.1)
         
         self._state = self._state + action
-
-        diff = self._state - self._goal
-        reward = -np.sqrt((diff**2).sum())
-        done = (np.abs(diff) < 0.01).sum() == 2
+        reward, done = compute_reward_done(self._state, self._goal)
 
         return self._state, reward, done, {'task': self._task}
 
-# # %%
-# env = Navigation2DEnvJAX() # maml debug env 
-# seed = onp.random.randint(1e5)
-# rng = jax.random.PRNGKey(seed)
-# rng, key = jax.random.split(rng, 2)
+# %%
+env = Navigation2DEnvJAX() # maml debug env 
+seed = onp.random.randint(1e5)
+rng = jax.random.PRNGKey(seed)
+rng, key = jax.random.split(rng, 2)
 
 # task = env.sample_tasks(5, rng=key)[0]
-# env.reset_task(task)
+task = {'goal': onp.array([1., 1.])}
+env.reset_task(task)
 
-# # %%
-# import matplotlib.pyplot as plt 
+# %%
+import matplotlib.pyplot as plt 
 
-# env.seed(0)
-# obs = env.reset()
+env.seed(0)
+obs = env.reset()
 
-# plt.scatter(*task['goal'], marker='*')
-# plt.scatter(*env._state, color='r')
-# xp, yp = obs
-# rewards = []
-# for _ in range(5):
-#     a = env.action_space.sample()
-#     obs2, r, done, _ = env.step(a)
-#     if done: break 
-#     x, y = obs2
-#     rewards.append(r)
+plt.scatter(*task['goal'], marker='*')
+plt.scatter(*env._state, color='r')
+xp, yp = obs
+rewards = []
+for _ in range(5):
+    a = env.action_space.sample()
+    # a = np.array([1., 1.])
+    obs2, r, done, _ = env.step(a)
+    if done: break 
+    x, y = obs2
+    rewards.append(r)
 
-#     plt.plot([xp, x], [yp, y], color='red')
-#     xp, yp = obs2
+    plt.plot([xp, x], [yp, y], color='red')
+    xp, yp = obs2
 
-# plt.show()
-# plt.plot(rewards)
-# plt.show()
+plt.show()
+plt.plot(rewards)
+plt.show()
 
-# # %%
+# %%
+import time 
+
+start = time.time()
+env = Navigation2DEnvJAX() # maml debug env 
+task = {'goal': onp.array([1., 1.])}
+env.reset_task(task)
+env.reset()
+while True:
+    a = np.array([1., 1.])
+    obs2, r, done, _ = env.step(a)
+    if done: break 
+print(time.time() - start)
+
+# %%
+# %%
+# %%
+

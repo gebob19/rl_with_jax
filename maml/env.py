@@ -5,7 +5,6 @@ import gym
 from gym import spaces
 from gym.utils import seeding
 
-#%%
 class Navigation2DEnv(gym.Env):
     """2D navigation problems, as described in [1]. The code is adapted from 
     https://github.com/cbfinn/maml_rl/blob/9c8e2ebd741cb0c7b8bf2d040c4caeeb8e06cc95/maml_examples/point_env_randgoal.py
@@ -55,33 +54,46 @@ class Navigation2DEnv(gym.Env):
         assert self.action_space.contains(action)
         self._state = self._state + action
 
-        x = self._state[0] - self._goal[0]
-        y = self._state[1] - self._goal[1]
-        reward = -np.sqrt(x ** 2 + y ** 2)
-        done = ((np.abs(x) < 0.01) and (np.abs(y) < 0.01))
+        diff = self._state - self._goal
+        reward = -np.sqrt((diff**2).sum())
+        done = (np.abs(diff) < 0.01).sum() == 2
+
+        # x = self._state[0] - self._goal[0]
+        # y = self._state[1] - self._goal[1]
+        # reward = -np.sqrt(x ** 2 + y ** 2)
+        # done = ((np.abs(x) < 0.01) and (np.abs(y) < 0.01))
 
         return self._state, reward, done, {'task': self._task}
 
-# %%
-env = Navigation2DEnv() # maml debug env 
+# #%%
+# import time 
 
-# %%
-task = env.sample_tasks(1)[0]
-
+# start = time.time()
+# env = Navigation2DEnv() # maml debug env 
+# task = {'goal': np.array([1., 1.])}
+# env.reset_task(task)
+# env.reset()
+# while True:
+#     a = np.array([1., 1.])
+#     obs2, r, done, _ = env.step(a)
+#     if done: break 
+# print(time.time() - start)
 
 #%%
-env.reset_task(task)
+# env.reset_task(task)
 
-# %%
-import time 
+# # %%
+# import time 
 
-env.seed(0)
-start = time.time()
-env.reset()
-step = 0 
-for _ in range(100):
-    obs2, r, done, _ = env.step(env.action_space.sample())
-    if done: break 
-time.time() - start
+# env.seed(0)
+# start = time.time()
+# env.reset()
+# step = 0 
+# for _ in range(100):
+#     obs2, r, done, _ = env.step(env.action_space.sample())
+#     if done: break 
+# time.time() - start
     
+# # %%
+
 # %%
