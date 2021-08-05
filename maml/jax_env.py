@@ -59,37 +59,42 @@ class Navigation2DEnvJAX(gym.Env):
 
         return self._state, reward, done, {'task': self._task}
 
-# # %%
-# env = Navigation2DEnvJAX() # maml debug env 
-# seed = onp.random.randint(1e5)
-# rng = jax.random.PRNGKey(seed)
-# rng, key = jax.random.split(rng, 2)
+# %%
+env = Navigation2DEnvJAX() # maml debug env 
+seed = onp.random.randint(1e5)
+rng = jax.random.PRNGKey(seed)
+rng, key = jax.random.split(rng, 2)
 
-# task = env.sample_tasks(5, rng=key)[0]
-# env.reset_task(task)
+task = env.sample_tasks(5, rng=key)[0]
+env.reset_task(task)
 
-# # %%
-# import matplotlib.pyplot as plt 
+# %%
 
-# env.seed(0)
-# obs = env.reset()
 
-# plt.scatter(*task['goal'], marker='*')
-# plt.scatter(*env._state, color='r')
-# xp, yp = obs
-# rewards = []
-# for _ in range(5):
-#     a = env.action_space.sample()
-#     obs2, r, done, _ = env.step(a)
-#     if done: break 
-#     x, y = obs2
-#     rewards.append(r)
+# %%
+import matplotlib.pyplot as plt 
 
-#     plt.plot([xp, x], [yp, y], color='red')
-#     xp, yp = obs2
+env.seed(0)
+obs = env.reset()
 
-# plt.show()
-# plt.plot(rewards)
-# plt.show()
+plt.scatter(*task['goal'], marker='*')
+plt.scatter(*env._state, color='r')
+xp, yp = obs
+rewards = []
+for _ in range(5):
+    a = env.action_space.sample()
+    obs2, r, done, _ = env.step(a)
+    if done: break 
+    x, y = obs2
+    rewards.append(r)
 
-# # %%
+    plt.plot([xp, x], [yp, y], color='red')
+    xp, yp = obs2
+
+plt.show()
+plt.plot(rewards)
+plt.show()
+
+# %%
+
+# %%
