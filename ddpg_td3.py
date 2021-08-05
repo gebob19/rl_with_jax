@@ -33,10 +33,20 @@ jax.config.update('jax_platform_name', 'cpu') # :(
 # env_name = 'BipedalWalker-v3'
 env_name = 'HalfCheetahBulletEnv-v0'
 
+class VelocityEnv(gym.RewardWrapper):
+    def reward(self, _):
+        r = onp.linalg.norm(self.unwrapped.robot_body.speed()) # robot velocity = reward
+        return r 
+
 env = gym.make(env_name)
-# walk backwards 
-env.unwrapped.robot.walk_target_x = -1000.
-env_name += '_backwards'
+
+# # walk backwards 
+# env.unwrapped.robot.walk_target_x = -1000.
+# env_name += '_backwards'
+
+# maximize speed at all cost 
+# env = VelocityEnv(env)
+# env_name += '_velocityR'
 
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
@@ -212,7 +222,7 @@ batch_size = 100
 buffer_size = 1e6
 gamma = 0.99 
 tau = 5e-3 ## very important parameter -- make or break 
-seed = 2119 #onp.random.randint(1e5) # on pendulum: seed=78583 converges (-200r) and seed=8171 doesn't (-1000r)
+seed = onp.random.randint(1e5) # on pendulum: seed=78583 converges (-200r) and seed=8171 doesn't (-1000r)
 print(f'[LOGGER] using seed={seed}')
 
 policy_lr = 1e-3
@@ -264,73 +274,73 @@ q_opt_state = q_optim.init(q_params)
 params = (p_params, q_params, p_params_t, q_params_t)
 opt_states = (p_opt_state, q_opt_state)
 
-# #%%
-# step_i = 0 
-# epi_i = 0
-# pbar = tqdm(total=total_n_steps)
+#%%
+step_i = 0 
+epi_i = 0
+pbar = tqdm(total=total_n_steps)
 
-# while step_i < total_n_steps: 
-#     action_noise.reset()
-#     obs = env.reset()
-#     rewards = []
-#     while True: 
-#         # rollout
-#         p_params = params[0]
-#         a = p_frwd(p_params, obs) + action_noise.sample()
-#         a = np.clip(a, a_low, a_high)
+while step_i < total_n_steps: 
+    action_noise.reset()
+    obs = env.reset()
+    rewards = []
+    while True: 
+        # rollout
+        p_params = params[0]
+        a = p_frwd(p_params, obs) + action_noise.sample()
+        a = np.clip(a, a_low, a_high)
 
-#         obs2, r, done, _ = env.step(a)
-#         vbuffer.push((obs, a, obs2, r, done))
-#         rewards.append(onp.asanyarray(r))
+        obs2, r, done, _ = env.step(a)
+        vbuffer.push((obs, a, obs2, r, done))
+        rewards.append(onp.asanyarray(r))
 
-#         obs = obs2 ## ** 
+        obs = obs2 ## ** 
         
-#         # update
-#         if not vbuffer.is_ready(batch_size): continue
-#         batch = vbuffer.sample(batch_size)
-#         params, opt_states, losses, grads = ddpg_step(params, opt_states, batch)
+        # update
+        if not vbuffer.is_ready(batch_size): continue
+        batch = vbuffer.sample(batch_size)
+        params, opt_states, losses, grads = ddpg_step(params, opt_states, batch)
 
-#         p_loss, q_loss = losses
-#         writer.add_scalar('loss/policy', p_loss.item(), step_i)
-#         writer.add_scalar('loss/q_fcn', q_loss.item(), step_i)
+        p_loss, q_loss = losses
+        writer.add_scalar('loss/policy', p_loss.item(), step_i)
+        writer.add_scalar('loss/q_fcn', q_loss.item(), step_i)
             
-#         step_i += 1 
-#         pbar.update(1)
-#         if done: break 
+        step_i += 1 
+        pbar.update(1)
+        if done: break 
 
-#     # evaluate without any noise 
-#     eval_rewards = []
-#     for _ in range(1):
-#         obs = env.reset()
-#         epi_reward = 0 
-#         while True: 
-#             p_params = params[0]
-#             a = p_frwd(p_params, obs)
-#             obs2, r, done, _ = env.step(a)
-#             epi_reward += r 
-#             obs = obs2
-#             if done: break 
-#         eval_rewards.append(epi_reward)
-#     eval_r = onp.mean(eval_rewards)
+    # evaluate without any noise 
+    eval_rewards = []
+    for _ in range(1):
+        obs = env.reset()
+        epi_reward = 0 
+        while True: 
+            p_params = params[0]
+            a = p_frwd(p_params, obs)
+            obs2, r, done, _ = env.step(a)
+            epi_reward += r 
+            obs = obs2
+            if done: break 
+        eval_rewards.append(epi_reward)
+    eval_r = onp.mean(eval_rewards)
     
-#     writer.add_scalar('rollout/total_reward', sum(rewards), step_i)
-#     writer.add_scalar('rollout/total_eval_reward', eval_r, step_i)
-#     writer.add_scalar('rollout/length', len(rewards), step_i)
+    writer.add_scalar('rollout/total_reward', sum(rewards), step_i)
+    writer.add_scalar('rollout/total_eval_reward', eval_r, step_i)
+    writer.add_scalar('rollout/length', len(rewards), step_i)
 
-#     if epi_i == 0 or eval_r > max_reward: 
-#         max_reward = eval_r
-#         with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
-#             cloudpickle.dump((p_params, q_params), f)
+    if epi_i == 0 or eval_r > max_reward: 
+        max_reward = eval_r
+        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            cloudpickle.dump((p_params, q_params), f)
 
-# pbar.close()
+pbar.close()
 
-# %%
-ppath = str(model_path/f'params_2075.77')
-# ppath = 'models/ddpg_td3/params_854.89'
+# # %%
+# ppath = str(model_path/f'params_2075.77')
+# # ppath = 'models/ddpg_td3/params_854.89'
 
-with open(ppath, 'rb') as f: 
-    p_params, q_params = cloudpickle.load(f)
+# with open(ppath, 'rb') as f: 
+#     p_params, q_params = cloudpickle.load(f)
 
-imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)#int(1e3))
+# imgs, _ = eval(p_params, env, f'{env_name}_td3_ddpg', max_step=300)#int(1e3))
 
-# %%
+# # %%

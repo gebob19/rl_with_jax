@@ -8,6 +8,10 @@ import haiku as hk
 import optax
 from functools import partial
 
+from torch.utils.tensorboard import SummaryWriter
+from tqdm import tqdm 
+import cloudpickle
+
 #%%
 ray.init()
 
@@ -152,14 +156,10 @@ optim = optax.chain(
 opt_state = optim.init(params)
 
 n_envs = 16
-n_steps = 5 
+n_steps = 20
 print(f'[LOGGER] using batchsize = {n_envs * n_steps}')
 
 workers = [Worker.remote() for _ in range(n_envs)]
-
-from torch.utils.tensorboard import SummaryWriter
-from tqdm import tqdm 
-import cloudpickle
 
 writer = SummaryWriter(comment=f'{env_name}_n-envs{n_envs}_seed{seed}')
 max_reward = -float('inf')
