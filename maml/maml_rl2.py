@@ -312,6 +312,10 @@ def maml_eval(env, params, rng, n_steps=1):
     return rewards
 
 #%%
+task = env.sample_tasks(1)[0]
+tasks = [task] * task_batch_size
+
+#%%
 from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter(comment=f'maml_test3_seed={seed}')
 
@@ -322,7 +326,7 @@ step_count = 0
 for e in tqdm(range(1, epochs+1)):
     # training 
     params = (p_params, v_params)
-    tasks = env.sample_tasks(task_batch_size)
+    # tasks = env.sample_tasks(task_batch_size)
 
     gradients = []
     for task in tqdm(tasks): 
@@ -342,7 +346,8 @@ for e in tqdm(range(1, epochs+1)):
 
     # eval 
     if e % eval_every == 0:
-        eval_task = env.sample_tasks(1)[0]
+        # eval_task = env.sample_tasks(1)[0]
+        eval_task = task 
         env.reset_task(eval_task)
 
         rng, subkey = jax.random.split(rng, 2)
