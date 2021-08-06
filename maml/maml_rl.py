@@ -120,13 +120,10 @@ def rollout2batches(rollout, batch_size, n_batches=1):
     n_chunks = rollout_len // batch_size
     # shuffle / de-correlate
     rollout = shuffle_rollout(rollout)
-    
     if n_chunks == 0: # too small to batch
         return rollout
     else: # batch 
-        batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout, is_leaf=lambda x: hasattr(x, 'shape'))
-        batch = [d[0] for d in batched_rollout] ## only 1 batch
-        return batch
+        return first_batch(rollout, n_chunks)
 
 def get_optim_fcn(optim):
     @jax.jit
@@ -134,7 +131,6 @@ def get_optim_fcn(optim):
         grads, opt_state = optim.update(grads, opt_state)
         params = optax.apply_updates(params, grads)
         return params, opt_state
-
     return update_step
 
 #%%
@@ -226,9 +222,16 @@ def advantage_vtarget(v_params, trajectory):
 def post_process_trajectory(v_params, trajectory):
     (obs, a, _, _, _, log_prob) = trajectory
     advantages, v_target = advantage_vtarget(v_params, trajectory)
+    log_prob = jax.lax.stop_gradient(log_prob)
     # repackage for ppo_loss
     trajectory = (obs, a, log_prob, v_target, advantages)
     return trajectory
+
+def get_ppo_trajectory(env, params, rng):
+    p_params, v_params = params
+    traj = rollout(env, p_params, rng)
+    traj = post_process_trajectory(v_params, traj)
+    return traj 
 
 @jax.jit
 def ppo_loss(p_params, v_params, batch):
@@ -258,24 +261,18 @@ def ppo_loss(p_params, v_params, batch):
 
     return loss 
 
-def get_ppo_trajectory(env, params, rng):
-    p_params, v_params = params
-    traj = rollout(env, p_params, rng)
-    traj = post_process_trajectory(v_params, traj)
-    return traj 
+ppo_loss_grad = jax.jit(jax.grad(ppo_loss, argnums=[0,1]))
 
 @jax.jit
 def sgd_step(params, grads, alpha):
     sgd_update = lambda lr: lambda param, grad: param - lr * grad
     return jax.tree_multimap(sgd_update(alpha), params, grads)
 
-ppo_grad = jax.jit(jax.grad(ppo_loss, argnums=[0,1]))
-
 def maml_inner(params, trajectory, alpha, batch_size):
     p_params, v_params = params
 
     batch = rollout2batches(trajectory, batch_size, n_batches=1)
-    p_g, v_g = ppo_grad(*params, batch)
+    p_g, v_g = ppo_loss_grad(*params, batch)
 
     inner_params_p = sgd_step(p_params, p_g, alpha)
     inner_params_v = sgd_step(v_params, v_g, alpha)

@@ -13,8 +13,19 @@ ray.init()
 
 #%%
 # env_name = 'Pendulum-v0'
-env_name = 'HalfCheetahBulletEnv-v0'
-env = gym.make(env_name)
+# # env_name = 'HalfCheetahBulletEnv-v0'
+# env = gym.make(env_name)
+
+from env import Navigation2DEnv
+env_name = 'Navigation2D'
+
+def make_env():
+    env = Navigation2DEnv()
+    env.seed(0)
+    task = env.sample_tasks(1)[0]
+    env.reset_task(task)
+    return env 
+env = make_env()
 
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
@@ -99,6 +110,8 @@ def rollout2batches(rollout, batch_size):
     idxs = onp.arange(rollout_len) 
     onp.random.shuffle(idxs)
     rollout = jax.tree_map(lambda x: x[idxs], rollout, is_leaf=lambda x: hasattr(x, 'shape'))
+    if n_chunks == 0: # too small to batch
+        return rollout
     # batch 
     batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout, is_leaf=lambda x: hasattr(x, 'shape'))
     for i in range(n_chunks):
@@ -137,9 +150,11 @@ def ppo_loss(p_params, v_params, batch):
 
     return loss 
 
+ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss, argnums=[0,1]))
+
 @jax.jit
 def ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch):
-    loss, (p_grads, v_grads) = jax.value_and_grad(ppo_loss, argnums=[0,1])(p_params, v_params, batch)
+    loss, (p_grads, v_grads) = ppo_loss_grad(p_params, v_params, batch)
     p_params, p_opt_state = update_step(p_params, p_grads, p_optim, p_opt_state)
     v_params, v_opt_state = update_step(v_params, v_grads, v_optim, v_opt_state)
     return loss, p_params, v_params, p_opt_state, v_opt_state
@@ -159,7 +174,8 @@ class Worker:
 
         self.buffer = Vector_ReplayBuffer(1e6)
         import pybullet_envs
-        self.env = gym.make(env_name)
+        # self.env = gym.make(env_name)
+        self.env = make_env()
         self.obs = self.env.reset()
 
     def compute_advantages(self, v_params, rollout):
@@ -208,15 +224,16 @@ class Worker:
         return rollout
 
 #%%
-seed = onp.random.randint(1e5)
 n_envs = 3
+
+seed = onp.random.randint(1e5)
 gamma = 0.99 
 eps = 0.2
 batch_size = 32 
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = env._max_episode_steps
+n_step_rollout = 100 #env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -239,7 +256,7 @@ v_opt_state = v_optim.init(v_params)
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'ppo_multi2_{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
+writer = SummaryWriter(comment=f'ppo_multi_{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
 
 #%%
 workers = [Worker.remote(n_step_rollout) for _ in range(n_envs)]
@@ -254,14 +271,12 @@ while step_i < max_n_steps:
     rollout = jax.tree_multimap(lambda *a: np.concatenate(a), *rollouts, is_leaf=lambda node: hasattr(node, 'shape'))
 
     ## update
-    total_loss = 0 
     for batch in rollout2batches(rollout, batch_size):
         loss, p_params, v_params, p_opt_state, v_opt_state = \
             ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch)
-        total_loss += loss
         step_i += 1 
         pbar.update(1)
-    writer.add_scalar('loss/loss', total_loss.item(), step_i)
+        writer.add_scalar('loss/loss', loss.item(), step_i)
 
     reward = eval(p_params, env, subkeys[-1])
     writer.add_scalar('eval/total_reward', reward.item(), step_i)

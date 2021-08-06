@@ -17,16 +17,18 @@ class Navigation2DEnv(gym.Env):
         Meta-Learning for Fast Adaptation of Deep Networks", 2017 
         (https://arxiv.org/abs/1703.03400)
     """
-    def __init__(self, task={}, low=-0.5, high=0.5):
+    def __init__(self, task={}, low=-0.5, high=0.5, max_n_steps=100):
         super(Navigation2DEnv, self).__init__()
         self.low = low
         self.high = high
+        self.max_n_steps = 0 
 
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
             shape=(2,), dtype=np.float32)
         self.action_space = spaces.Box(low=-0.1, high=0.1,
             shape=(2,), dtype=np.float32)
 
+        self._step_count = 0 
         self._task = task
         self._goal = task.get('goal', np.zeros(2, dtype=np.float32))
         self._state = np.zeros(2, dtype=np.float32)
@@ -46,6 +48,7 @@ class Navigation2DEnv(gym.Env):
         self._goal = task['goal']
 
     def reset(self):
+        self._step_count = 0 
         self._state = np.zeros(2, dtype=np.float32)
         return self._state
 
@@ -56,39 +59,9 @@ class Navigation2DEnv(gym.Env):
 
         diff = self._state - self._goal
         reward = -np.sqrt((diff**2).sum())
-        done = (np.abs(diff) < 0.01).sum() == 2
+        done = (np.abs(diff) < 0.01).sum() == 2 
+
+        done = done or self._step_count >= self.max_n_steps
+        self._step_count += 1 
 
         return self._state, reward, done, {'task': self._task}
-
-# #%%
-# import time 
-
-# start = time.time()
-# env = Navigation2DEnv() # maml debug env 
-# task = {'goal': np.array([1., 1.])}
-# env.reset_task(task)
-# env.reset()
-# while True:
-#     a = np.array([1., 1.])
-#     obs2, r, done, _ = env.step(a)
-#     if done: break 
-# print(time.time() - start)
-
-#%%
-# env.reset_task(task)
-
-# # %%
-# import time 
-
-# env.seed(0)
-# start = time.time()
-# env.reset()
-# step = 0 
-# for _ in range(100):
-#     obs2, r, done, _ = env.step(env.action_space.sample())
-#     if done: break 
-# time.time() - start
-    
-# # %%
-
-# %%
