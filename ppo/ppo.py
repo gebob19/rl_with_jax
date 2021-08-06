@@ -6,6 +6,7 @@ import distrax
 import optax
 import gym 
 from functools import partial
+import cloudpickle
 
 # env_name = 'Pendulum-v0'
 # env = gym.make(env_name)
@@ -51,6 +52,25 @@ def _critic_fcn(s):
     ])(s)
     return v 
 
+policy_fcn = hk.transform(_policy_fcn)
+policy_fcn = hk.without_apply_rng(policy_fcn)
+p_frwd = jax.jit(policy_fcn.apply)
+
+critic_fcn = hk.transform(_critic_fcn)
+critic_fcn = hk.without_apply_rng(critic_fcn)
+v_frwd = jax.jit(critic_fcn.apply)
+
+# %%
+@jax.jit 
+def policy(params, obs, rng):
+    mu, sig = p_frwd(params, obs)
+    rng, subrng = jax.random.split(rng)
+    dist = distrax.MultivariateNormalDiag(mu, sig)
+    a = dist.sample(seed=subrng)
+    a = np.clip(a, a_low, a_high)
+    log_prob = dist.log_prob(a)
+    return a, log_prob
+
 def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
@@ -62,17 +82,7 @@ def eval(params, env, rng):
         rewards += r
         if done: break 
     return rewards
-
-@jax.jit 
-def policy(params, obs, rng):
-    mu, sig = p_frwd(params, obs)
-    rng, subrng = jax.random.split(rng)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
-    a = dist.sample(seed=subrng)
-    a = np.clip(a, a_low, a_high)
-    log_prob = dist.log_prob(a)
-    return a, log_prob
-
+    
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
@@ -94,15 +104,7 @@ class Vector_ReplayBuffer:
         self.i = 0 
         self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
 
-policy_fcn = hk.transform(_policy_fcn)
-policy_fcn = hk.without_apply_rng(policy_fcn)
-p_frwd = jax.jit(policy_fcn.apply)
 
-critic_fcn = hk.transform(_critic_fcn)
-critic_fcn = hk.without_apply_rng(critic_fcn)
-v_frwd = jax.jit(critic_fcn.apply)
-
-# %%
 def shuffle_rollout(rollout):
     rollout_len = rollout[0].shape[0]
     idxs = onp.arange(rollout_len) 
@@ -185,27 +187,10 @@ class Worker:
     def __init__(self, n_steps):
         self.n_steps = n_steps
         self.buffer = Vector_ReplayBuffer(1e6)
-        import pybullet_envs
+        # import pybullet_envs
         # self.env = gym.make(env_name)
         self.env = make_env()
         self.obs = self.env.reset()
-
-    def compute_advantages(self, v_params, rollout):
-        (obs, _, r, obs2, done, _) = rollout
-        r = (r - r.mean()) / (r.std() + 1e-10) # normalize
-        
-        batch_v_fcn = jax.vmap(partial(v_frwd, v_params))
-        v_obs = batch_v_fcn(obs)
-        v_obs2 = batch_v_fcn(obs2)
-
-        v_target = r + (1 - done) * 0.99 * v_obs2
-        advantages = v_target - v_obs
-        advantages = jax.lax.stop_gradient(advantages)
-        v_target = jax.lax.stop_gradient(v_target)
-        
-        # normalize 
-        advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
-        return advantages, v_target
 
     def rollout(self, p_params, v_params, rng):
         self.buffer.clear()
@@ -223,7 +208,7 @@ class Worker:
 
         # update rollout contents 
         rollout = self.buffer.contents()
-        advantages, v_target = self.compute_advantages(v_params, rollout)
+        advantages, v_target = compute_advantages(v_params, rollout)
         (obs, a, r, _, _, log_prob) = rollout
         log_prob = jax.lax.stop_gradient(log_prob)
         rollout = (obs, a, log_prob, v_target, advantages)
@@ -261,10 +246,15 @@ v_optim = optimizer(v_lr)
 p_opt_state = p_optim.init(p_params)
 v_opt_state = v_optim.init(v_params)
 
+import pathlib 
+model_path = pathlib.Path(f'./models/ppo/{env_name}')
+model_path.mkdir(exist_ok=True, parents=True)
+
 #%%
 from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter(comment=f'ppo_{env_name}_seed={seed}')
 
+epi_i = 0 
 step_i = 0 
 from tqdm import tqdm 
 pbar = tqdm(total=max_n_steps)
@@ -285,5 +275,12 @@ while step_i < max_n_steps:
     rng, subrng = jax.random.split(rng)
     reward = eval(p_params, env, subrng)
     writer.add_scalar('eval/total_reward', reward.item(), step_i)
+
+    if epi_i == 0 or reward > max_reward: 
+        max_reward = reward
+        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            cloudpickle.dump((p_params, v_params), f)
+    
+    epi_i += 1
 
 # %%
