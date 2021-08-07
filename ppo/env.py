@@ -21,7 +21,7 @@ class Navigation2DEnv(gym.Env):
         super(Navigation2DEnv, self).__init__()
         self.low = low
         self.high = high
-        self.max_n_steps = 0 
+        self.max_n_steps = max_n_steps
 
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
             shape=(2,), dtype=np.float32)

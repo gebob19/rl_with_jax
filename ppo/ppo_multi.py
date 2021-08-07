@@ -1,3 +1,5 @@
+## not impl correctly... 
+
 #%%
 import jax
 import jax.numpy as np 
