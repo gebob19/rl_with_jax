@@ -63,25 +63,23 @@ obs_dim = obs.shape
 print(f'[LOGGER] obs_dim: {obs_dim} n_actions: {n_actions}')
 
 def _policy_value(obs):
-    backbone1 = hk.Sequential([
+    # policy
+    z = hk.Sequential([
         hk.Conv2D(16, 8, 4), jax.nn.relu, 
         hk.Conv2D(32, 4, 2), jax.nn.relu, 
-    ])
-    z = backbone1(obs)
+    ])(obs)
     z = np.reshape(z, (-1,))
-    
-    backbone2 = hk.Sequential([
-        hk.Conv2D(16, 8, 4), jax.nn.relu, 
-        hk.Conv2D(32, 4, 2), jax.nn.relu, 
-    ])
-    z2 = backbone2(obs)
-    z2 = np.reshape(z2, (-1,))
-
     pi = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
-        hk.Linear(n_actions), jax.nn.softmax
     ])(z)
+    
+    # value 
+    z2 = hk.Sequential([
+        hk.Conv2D(16, 8, 4), jax.nn.relu, 
+        hk.Conv2D(32, 4, 2), jax.nn.relu, 
+    ])(obs)
+    z2 = np.reshape(z2, (-1,))
     v = hk.Sequential([
         hk.Linear(128), jax.nn.relu, 
         hk.Linear(128), jax.nn.relu,
