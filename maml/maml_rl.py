@@ -329,7 +329,7 @@ tasks = env.sample_tasks(2) ## only two tasks
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'maml_1task_test_seed={seed}')
+writer = SummaryWriter(comment=f'maml_2task_test_seed={seed}')
 
 #%%
 from tqdm import tqdm 
@@ -359,19 +359,27 @@ for e in tqdm(range(1, epochs+1)):
     # eval 
     if e % eval_every == 0:
         # eval_task = env.sample_tasks(1)[0]
-        # eval_task = tasks[onp.random.randint(0, 2)]
-        eval_task = tasks[0]
-        env.reset_task(eval_task)
+        eval_tasks = tasks[:2]
+        task_rewards = []
+        for task_i, eval_task in enumerate(eval_tasks):
+            env.reset_task(eval_task)
 
-        rng, subkey = jax.random.split(rng, 2)
-        rewards = maml_eval(env, (p_params, v_params), subkey, n_steps=3)
+            rng, subkey = jax.random.split(rng, 2)
+            rewards = maml_eval(env, (p_params, v_params), subkey, n_steps=3)
+            task_rewards.append(rewards)
 
-        for i, r in enumerate(rewards):
-            writer.add_scalar(f'reward/{i}step', r, e)
+            for step_i, r in enumerate(rewards):
+                writer.add_scalar(f'task{task_i}/reward_{step_i}step', r, e)
+
+        mean_rewards=[]
+        for step_i in range(len(task_rewards[0])):
+            mean_r = sum([task_rewards[j][step_i] for j in range(len(task_rewards))]) / 2
+            writer.add_scalar(f'mean_task/reward_{step_i}step', mean_r, e)
+            mean_rewards.append(mean_r)
 
         # if e == eval_every or rewards[1] > max_reward: 
 
-        max_reward = rewards[1] # eval on single grad step 
+        max_reward = mean_rewards[1] # eval on single grad step 
         save_path = str(model_path/f'params_e{e}_{max_reward:.2f}')
         print(f'saving model to {save_path}...')
         with open(save_path, 'wb') as f: 
