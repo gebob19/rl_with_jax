@@ -228,10 +228,8 @@ def advantage_vtarget(v_params, rollout):
     
     return adv, v_target
 
-@jax.jit 
 def post_process_trajectory(v_params, trajectory):
     (obs, a, _, _, _, log_prob) = trajectory
-    log_prob = jax.lax.stop_gradient(log_prob)
     advantages, v_target = advantage_vtarget(v_params, trajectory)
     # repackage for ppo_loss
     trajectory = (obs, a, log_prob, v_target, advantages)
@@ -324,12 +322,14 @@ def maml_eval(env, params, rng, n_steps=1):
 
 #%%
 env.seed(0)
-tasks = env.sample_tasks(2) ## only two tasks 
-tasks = tasks * (task_batch_size//2)
+# tasks = env.sample_tasks(2) ## only two tasks 
+# tasks = tasks * (task_batch_size//2)
+
+tasks = env.sample_tasks(1) * task_batch_size ## only ONE tasks 
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'maml_2task_test_seed={seed}')
+writer = SummaryWriter(comment=f'maml_1task_test_seed={seed}')
 
 #%%
 from tqdm import tqdm 
@@ -359,7 +359,8 @@ for e in tqdm(range(1, epochs+1)):
     # eval 
     if e % eval_every == 0:
         # eval_task = env.sample_tasks(1)[0]
-        eval_task = tasks[onp.random.randint(0, 2)]
+        # eval_task = tasks[onp.random.randint(0, 2)]
+        eval_task = tasks[0]
         env.reset_task(eval_task)
 
         rng, subkey = jax.random.split(rng, 2)
