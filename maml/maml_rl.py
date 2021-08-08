@@ -247,7 +247,7 @@ def ppo_loss(p_params, v_params, sample):
 
     ## critic loss
     v_obs = v_frwd(v_params, obs)
-    critic_loss = 0.5 * ((v_obs - v_target) ** 2)
+    critic_loss = (0.5 * ((v_obs - v_target) ** 2)).sum()
 
     ## policy losses 
     mu, sig = p_frwd(p_params, obs)
@@ -257,19 +257,28 @@ def ppo_loss(p_params, v_params, sample):
     # policy gradient 
     log_prob = dist.log_prob(a)
 
+    approx_kl = (old_log_prob - log_prob).sum()
     ratio = np.exp(log_prob - old_log_prob)
     p_loss1 = ratio * advantages
     p_loss2 = np.clip(ratio, 1-eps, 1+eps) * advantages
-    policy_loss = -np.fmin(p_loss1, p_loss2)
+    policy_loss = -np.fmin(p_loss1, p_loss2).sum()
+
+    clipped_mask = ((ratio > 1+eps) | (ratio < 1-eps)).astype(np.float32)
+    clip_frac = clipped_mask.mean()
 
     loss = policy_loss + 0.001 * entropy_loss + critic_loss
 
-    return loss.sum()
+    info = dict(ploss=policy_loss, entr=-entropy_loss, vloss=critic_loss, 
+        approx_kl=approx_kl, cf=clip_frac)
+
+    return loss, info
 
 def ppo_loss_batch(p_params, v_params, batch):
-    return jax.vmap(partial(ppo_loss, p_params, v_params))(batch).mean()
+    out = jax.vmap(partial(ppo_loss, p_params, v_params))(batch)
+    loss, info = jax.tree_map(lambda x: x.mean(), out)
+    return loss, info
 
-ppo_loss_grad = jax.jit(jax.grad(ppo_loss_batch, argnums=[0,1]))
+ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss_batch, argnums=[0,1], has_aux=True))
 
 @jax.jit
 def sgd_step(params, grads, alpha):
@@ -280,25 +289,26 @@ def maml_inner(params, trajectory, alpha, batch_size):
     p_params, v_params = params
 
     batch = rollout2batches(trajectory, batch_size, n_batches=1)
-    p_g, v_g = ppo_loss_grad(*params, batch)
+    (_, info), (p_g, v_g) = ppo_loss_grad(*params, batch)
 
     inner_params_p = sgd_step(p_params, p_g, alpha)
     inner_params_v = sgd_step(v_params, v_g, alpha)
 
-    return inner_params_p, inner_params_v
+    return (inner_params_p, inner_params_v), info
 
 def maml_loss(params, env, rng):
     subkeys = jax.random.split(rng, 2)
     # meta train
     meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
-    inner_params = maml_inner(params, meta_train_traj, alpha, fast_batch_size)
+    inner_params, _ = maml_inner(params, meta_train_traj, alpha, fast_batch_size)
     # meta test
     meta_test_traj = get_ppo_trajectory(env, inner_params, subkeys[1])
-    meta_test_loss = ppo_loss_batch(*inner_params, meta_test_traj)
+    meta_test_loss, _ = ppo_loss_batch(*inner_params, meta_test_traj)
     return meta_test_loss
 
 def maml_eval(env, params, rng, n_steps=1):
     rewards = []
+    infos = []
     rng, subkey = jax.random.split(rng, 2)
     reward_0step = eval(params[0], env, subkey)
     # reward_0step = rollout(env, params[0], subkey)[2].sum()
@@ -306,23 +316,26 @@ def maml_eval(env, params, rng, n_steps=1):
     rewards.append(reward_0step)
 
     eval_alpha = alpha
-    for _ in range(n_steps):
+    for step_i in range(n_steps):
         rng, *subkeys = jax.random.split(rng, 3)
         meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
-        inner_params = maml_inner(params, meta_train_traj, eval_alpha, eval_fast_batch_size)
+        inner_params, info = maml_inner(params, meta_train_traj, eval_alpha, eval_fast_batch_size)
 
         r = eval(inner_params[0], env, subkeys[1])
         # r = rollout(env, inner_params[0], subkeys[1])[2].sum()
 
         rewards.append(r)
+        infos.append(info)
         params = inner_params
         eval_alpha = alpha / 2 
 
-    return rewards
+    return rewards, infos
 
 #%%
 env.seed(0)
-tasks = env.sample_tasks(2) ## only two tasks 
+task = env.sample_tasks(1)[0] ## only two tasks 
+task2 = {'goal': -task['goal'].copy()}
+tasks = [task, task2]
 # tasks = tasks * (task_batch_size//2)
 
 # tasks = env.sample_tasks(1) * task_batch_size ## only ONE tasks 
@@ -341,35 +354,49 @@ for e in tqdm(range(1, epochs+1)):
     # tasks = env.sample_tasks(task_batch_size)
 
     gradients = []
-    for task_i, task in tqdm(enumerate(tasks)): 
+    for task_i, task in enumerate(tqdm(tasks)): 
         env.reset_task(task)
         rng, subkey = jax.random.split(rng, 2)
         loss, grads = jax.value_and_grad(maml_loss)(params, env, subkey)
         
-        writer.add_scalar('loss/loss', loss.item(), step_count)
+        writer.add_scalar(f'loss/task_{task_i}loss', loss.item(), step_count)
+        
+        for i, g in enumerate(jax.tree_leaves(grads)): 
+            name = 'b' if len(g.shape) == 1 else 'w'
+            writer.add_histogram(f'task_{task_i}_{name}_{i}_grad', onp.array(g), step_count)
+
         gradients.append(grads)
         step_count += 1 
             
-    grad = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
+    grads = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
+    for i, g in enumerate(jax.tree_leaves(grads)): 
+        name = 'b' if len(g.shape) == 1 else 'w'
+        writer.add_histogram(f'task_{task_i}_{name}_{i}_grad', onp.array(g), step_count)
 
-    p_grad, v_grad = grad
+    p_grad, v_grad = grads
     p_params, p_opt_state = p_optim_func(p_params, p_grad, p_opt_state)
     v_params, v_opt_state = v_optim_func(v_params, v_grad, v_opt_state)
 
     # eval 
     if e % eval_every == 0:
         # eval_task = env.sample_tasks(1)[0]
-        eval_tasks = tasks[:2]
+        eval_tasks = tasks
         task_rewards = []
         for task_i, eval_task in enumerate(eval_tasks):
             env.reset_task(eval_task)
 
             rng, subkey = jax.random.split(rng, 2)
-            rewards = maml_eval(env, (p_params, v_params), subkey, n_steps=3)
+            rewards, infos = maml_eval(env, (p_params, v_params), subkey, n_steps=3)
             task_rewards.append(rewards)
 
             for step_i, r in enumerate(rewards):
                 writer.add_scalar(f'task{task_i}/reward_{step_i}step', r, e)
+            
+
+            for step_i, info in enumerate(infos):
+            #     for k in info.keys(): 
+                k='vloss'
+                writer.add_scalar(f'task{task_i}/{k}_{step_i}step', info[k].item(), e)
 
         mean_rewards=[]
         for step_i in range(len(task_rewards[0])):
@@ -379,11 +406,11 @@ for e in tqdm(range(1, epochs+1)):
 
         # if e == eval_every or rewards[1] > max_reward: 
 
-        max_reward = mean_rewards[1] # eval on single grad step 
-        save_path = str(model_path/f'params_e{e}_{max_reward:.2f}')
-        print(f'saving model to {save_path}...')
-        with open(save_path, 'wb') as f: 
-            cloudpickle.dump((p_params, v_params), f)
+        # max_reward = mean_rewards[1] # eval on single grad step 
+        # save_path = str(model_path/f'params_e{e}_{max_reward:.2f}')
+        # print(f'saving model to {save_path}...')
+        # with open(save_path, 'wb') as f: 
+        #     cloudpickle.dump((p_params, v_params), f)
 
 #%%
 #%%
