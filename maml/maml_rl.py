@@ -322,10 +322,10 @@ def maml_eval(env, params, rng, n_steps=1):
 
 #%%
 env.seed(0)
-# tasks = env.sample_tasks(2) ## only two tasks 
+tasks = env.sample_tasks(2) ## only two tasks 
 # tasks = tasks * (task_batch_size//2)
 
-tasks = env.sample_tasks(1) * task_batch_size ## only ONE tasks 
+# tasks = env.sample_tasks(1) * task_batch_size ## only ONE tasks 
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
@@ -341,7 +341,7 @@ for e in tqdm(range(1, epochs+1)):
     # tasks = env.sample_tasks(task_batch_size)
 
     gradients = []
-    for task in tqdm(tasks): 
+    for task_i, task in tqdm(enumerate(tasks)): 
         env.reset_task(task)
         rng, subkey = jax.random.split(rng, 2)
         loss, grads = jax.value_and_grad(maml_loss)(params, env, subkey)
@@ -349,7 +349,7 @@ for e in tqdm(range(1, epochs+1)):
         writer.add_scalar('loss/loss', loss.item(), step_count)
         gradients.append(grads)
         step_count += 1 
-        
+            
     grad = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
 
     p_grad, v_grad = grad
