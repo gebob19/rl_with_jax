@@ -82,12 +82,6 @@ v_frwd = jax.jit(critic_fcn.apply)
 
 # %%
 @jax.jit 
-def eval_policy(params, obs):
-    a, _ = p_frwd(params, obs)
-    a = np.clip(a, a_low, a_high)
-    return a
-
-@jax.jit 
 def policy(params, obs, rng):
     mu, sig = p_frwd(params, obs)
     dist = distrax.MultivariateNormalDiag(mu, sig)
@@ -98,8 +92,7 @@ def policy(params, obs, rng):
 
 @jax.jit 
 def eval_policy(params, obs, rng):
-    mu, _ = p_frwd(params, obs)
-    a = mu
+    a, _ = p_frwd(params, obs)
     a = np.clip(a, a_low, a_high)
     return a, None
 
