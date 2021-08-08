@@ -91,7 +91,7 @@ def policy(params, obs, rng):
     return a, log_prob
 
 @jax.jit 
-def eval_policy(params, obs):
+def eval_policy(params, obs, _):
     a, _ = p_frwd(params, obs)
     a = np.clip(a, a_low, a_high)
     return a, None
@@ -159,7 +159,7 @@ fast_batch_size = 20
 eval_fast_batch_size = 40
 alpha = 0.5
 # eval 
-eval_every = 10
+eval_every = 1
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
