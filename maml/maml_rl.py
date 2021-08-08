@@ -16,7 +16,7 @@ config.update("jax_enable_x64", True)
 config.update("jax_debug_nans", True) # break on nans
 
 #%%
-env_name = 'Navigation2D'
+env_name = 'Navigation2D_2task'
 env = Navigation2DEnv() # maml debug env 
 
 n_actions = env.action_space.shape[0]
@@ -89,12 +89,20 @@ def policy(params, obs, rng):
     log_prob = dist.log_prob(a)
     return a, log_prob
 
+@jax.jit 
+def eval_policy(params, obs):
+    a, _ = p_frwd(params, obs)
+    a = np.clip(a, a_low, a_high)
+    return a
+
 def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
     while True: 
-        rng, subkey = jax.random.split(rng, 2)
-        a = policy(params, obs, subkey)[0]
+        # rng, subkey = jax.random.split(rng, 2)
+        # a = policy(params, obs, subkey)[0]
+
+        a = eval_policy(params, obs)
         
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
@@ -136,8 +144,8 @@ def get_optim_fcn(optim):
 #%%
 ### optim, lr and alpha update 
 seed = onp.random.randint(1e5) # 0 
-policy_lr = 1e-3
-v_lr = 1e-3
+policy_lr = 1e-2
+v_lr = 1e-2
 # ppo 
 gamma = 0.99 
 eps = 0.2 
@@ -147,9 +155,9 @@ max_n_steps = 100
 task_batch_size = 40
 fast_batch_size = 20
 eval_fast_batch_size = 40
-alpha = 0.1
+alpha = 0.5
 # eval 
-eval_every = 1
+eval_every = 10
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -194,8 +202,8 @@ def rollout(env, p_params, rng):
         obs2, r, done, _ = env.step(a)
         buffer.push((obs, a, r, obs2, done, log_prob))
         
-        if done: break 
         obs = obs2
+        if done: break 
 
     trajectory = buffer.contents()
     return trajectory 
@@ -247,8 +255,9 @@ def ppo_loss(p_params, v_params, batch):
     mu, sig = batch_policy(obs)
     dist = distrax.MultivariateNormalDiag(mu, sig)
     
-    # entropy 
-    entropy_loss = -dist.entropy()[:, None]
+    # # entropy 
+    # entropy_loss = -dist.entropy()[:, None]
+
     # policy gradient 
     log_probs = dist.log_prob(a)[:, None]
     ratio = np.exp(log_probs - old_log_prob)
@@ -265,8 +274,8 @@ ppo_loss_grad = jax.jit(jax.grad(ppo_loss, argnums=[0,1]))
 
 @jax.jit
 def sgd_step(params, grads, alpha):
-    sgd_update = lambda lr: lambda param, grad: param - lr * grad
-    return jax.tree_multimap(sgd_update(alpha), params, grads)
+    sgd_update = lambda param, grad: param - alpha * grad
+    return jax.tree_multimap(sgd_update, params, grads)
 
 def maml_inner(params, trajectory, alpha, batch_size):
     p_params, v_params = params
@@ -292,7 +301,9 @@ def maml_loss(params, env, rng):
 def maml_eval(env, params, rng, n_steps=1):
     rewards = []
     rng, subkey = jax.random.split(rng, 2)
-    reward_0step = rollout(env, params[0], subkey)[2].sum()
+    reward_0step = eval(params[0], env, subkey)
+    # reward_0step = rollout(env, params[0], subkey)[2].sum()
+    
     rewards.append(reward_0step)
 
     eval_alpha = alpha
@@ -301,7 +312,9 @@ def maml_eval(env, params, rng, n_steps=1):
         meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
         inner_params = maml_inner(params, meta_train_traj, eval_alpha, eval_fast_batch_size)
 
-        r = rollout(env, inner_params[0], subkeys[1])[2].sum()
+        r = eval(inner_params[0], env, subkeys[1])
+        # r = rollout(env, inner_params[0], subkeys[1])[2].sum()
+
         rewards.append(r)
         params = inner_params
         eval_alpha = alpha / 2 
@@ -309,12 +322,13 @@ def maml_eval(env, params, rng, n_steps=1):
     return rewards
 
 #%%
-task = env.sample_tasks(1)[0]
-tasks = [task] * task_batch_size
+env.seed(0)
+tasks = env.sample_tasks(2) ## only two tasks 
+tasks = tasks * (task_batch_size//2)
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'maml_1task_test_seed={seed}')
+writer = SummaryWriter(comment=f'maml_2task_test_seed={seed}')
 
 #%%
 from tqdm import tqdm 
@@ -344,7 +358,7 @@ for e in tqdm(range(1, epochs+1)):
     # eval 
     if e % eval_every == 0:
         # eval_task = env.sample_tasks(1)[0]
-        eval_task = task 
+        eval_task = tasks[onp.random.randint(0, 2)]
         env.reset_task(eval_task)
 
         rng, subkey = jax.random.split(rng, 2)
@@ -353,18 +367,18 @@ for e in tqdm(range(1, epochs+1)):
         for i, r in enumerate(rewards):
             writer.add_scalar(f'reward/{i}step', r, e)
 
-        if e == eval_every or rewards[1] > max_reward: 
-            max_reward = rewards[1] # eval on single grad step 
-            save_path = str(model_path/f'params_e{e}_{max_reward:.2f}')
-            print(f'saving model to {save_path}...')
-            with open(save_path, 'wb') as f: 
-                cloudpickle.dump((p_params, v_params), f)
+        # if e == eval_every or rewards[1] > max_reward: 
 
+        max_reward = rewards[1] # eval on single grad step 
+        save_path = str(model_path/f'params_e{e}_{max_reward:.2f}')
+        print(f'saving model to {save_path}...')
+        with open(save_path, 'wb') as f: 
+            cloudpickle.dump((p_params, v_params), f)
 
 #%%
 #%%
 # #%%
-# save_path = '/home/brennan/rl_with_jax/models/maml/Navigation2D/params_e80_-40.68'
+# save_path = '/home/brennan/rl_with_jax/models/maml/Navigation2D/params_e16_-7.17'
 # with open(save_path, 'rb') as f: 
 #     (p_params, v_params) = cloudpickle.load(f)
 
@@ -374,7 +388,7 @@ for e in tqdm(range(1, epochs+1)):
 
 # #%%
 # rng, subkey = jax.random.split(rng, 2)
-# render(params[0], env, subkey, 100)
+# render(p_params, env, subkey, 100)
 
 # #%%
 # n_steps = 3 
@@ -383,7 +397,7 @@ for e in tqdm(range(1, epochs+1)):
 # for i in range(1, n_steps+1):
 #     rng, *subkeys = jax.random.split(rng, 3)
 #     meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
-#     inner_params = maml_inner(params, meta_train_traj, eval_alpha)
+#     inner_params = maml_inner(params, meta_train_traj, eval_alpha, eval_fast_batch_size)
 
 #     rng, subkey = jax.random.split(rng, 2)
 #     plt.title(f'step{i}')
@@ -391,31 +405,14 @@ for e in tqdm(range(1, epochs+1)):
 #     print(f'step{i} : {r}')
 
 #     params = inner_params
-#     eval_alpha = alpha / 2 
+#     eval_alpha = alpha / 2
+#     break  
 
 # #%%
+# for p1, p2 in zip(jax.tree_leaves((p_params, v_params)), jax.tree_leaves(inner_params)):
+#     print(np.abs(p1 - p2).sum())
 
 # #%%
-# env.seed(0)
-# obs = env.reset()
-
-# plt.scatter(*task['goal'], marker='*')
-# plt.scatter(*env._state, color='r')
-# xp, yp = obs
-# rewards = []
-# for _ in range(100):
-#     a = np.array([-0.1, 0.1])
-#     obs2, r, done, _ = env.step(a)
-#     if done: break 
-#     x, y = obs2
-#     rewards.append(r)
-
-#     plt.plot([xp, x], [yp, y], color='red')
-#     xp, yp = obs2
-#     obs = obs2
-
-# plt.show()
-
 # #%%
 # import matplotlib.pyplot as plt 
 
@@ -428,8 +425,7 @@ for e in tqdm(range(1, epochs+1)):
 #     xp, yp = obs
 #     rewards = []
 #     for _ in range(n_steps):
-#         rng, subkey = jax.random.split(rng, 2)
-#         a, _ = policy(p_params, obs, subkey)
+#         a = eval_policy(p_params, obs)
 
 #         obs2, r, done, _ = env.step(a)
 #         if done: break 

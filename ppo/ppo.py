@@ -8,20 +8,20 @@ import gym
 from functools import partial
 import cloudpickle
 
-# env_name = 'Pendulum-v0'
-# env = gym.make(env_name)
+env_name = 'Pendulum-v0'
+make_env = lambda: gym.make(env_name)
 
-from env import Navigation2DEnv
-env_name = 'Navigation2D'
-def make_env():
-    env = Navigation2DEnv()
-    env.seed(0)
-    task = env.sample_tasks(1)[0]
-    print(f'LOGGER: task = {task}')
-    env.reset_task(task)
-    return env 
+# from env import Navigation2DEnv
+# env_name = 'Navigation2D'
+# def make_env():
+#     env = Navigation2DEnv()
+#     env.seed(0)
+#     task = env.sample_tasks(1)[0]
+#     print(f'LOGGER: task = {task}')
+#     env.reset_task(task)
+#     return env 
+
 env = make_env()
-
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
 
@@ -62,6 +62,12 @@ v_frwd = jax.jit(critic_fcn.apply)
 
 # %%
 @jax.jit 
+def eval_policy(params, obs):
+    a, _ = p_frwd(params, obs)
+    a = np.clip(a, a_low, a_high)
+    return a
+
+@jax.jit 
 def policy(params, obs, rng):
     mu, sig = p_frwd(params, obs)
     rng, subrng = jax.random.split(rng)
@@ -75,8 +81,10 @@ def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
     while True: 
-        rng, subrng = jax.random.split(rng)
-        a = policy(params, obs, subrng)[0]
+        # a = eval_policy(params, obs)
+        rng, subkey = jax.random.split(rng)
+        a = policy(params, obs, subkey)[0]
+
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
         rewards += r
@@ -164,7 +172,8 @@ def ppo_loss(p_params, v_params, batch):
     p_loss2 = np.clip(ratio, 1-eps, 1+eps) * advantages
     policy_loss = -np.fmin(p_loss1, p_loss2)
 
-    loss = policy_loss + 0.001 * entropy_loss + critic_loss
+    # loss = policy_loss + 0.001 * entropy_loss + critic_loss
+    loss = policy_loss + critic_loss
     loss = loss.mean()
 
     return loss 
@@ -188,7 +197,6 @@ class Worker:
         self.n_steps = n_steps
         self.buffer = Vector_ReplayBuffer(1e6)
         # import pybullet_envs
-        # self.env = gym.make(env_name)
         self.env = make_env()
         self.obs = self.env.reset()
 
@@ -259,7 +267,7 @@ step_i = 0
 from tqdm import tqdm 
 pbar = tqdm(total=max_n_steps)
 while step_i < max_n_steps: 
-    rng, subkey = jax.random.split(rng, 2) 
+    rng, subkey = jax.random.split(rng) 
     rollout = worker.rollout(p_params, v_params, subkey)
 
     for batch in rollout2batches(rollout, batch_size):
@@ -269,18 +277,58 @@ while step_i < max_n_steps:
         pbar.update(1)
         writer.add_scalar('loss/loss', loss.item(), step_i)
 
-    if n_actions == 1: 
-        writer.add_scalar('policy/log_std', p_params['~']['log_std'].item(), step_i)
+    writer.add_scalar('policy/log_std', p_params['~']['log_std'].mean().item(), step_i)
     
-    rng, subrng = jax.random.split(rng)
-    reward = eval(p_params, env, subrng)
+    rng, subkey = jax.random.split(rng) 
+    reward = eval(p_params, env, rng)
     writer.add_scalar('eval/total_reward', reward.item(), step_i)
 
     if epi_i == 0 or reward > max_reward: 
         max_reward = reward
-        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+        save_path = str(model_path/f'params_{max_reward:.2f}')
+        print(f'Saving model {save_path}...')
+        with open(save_path, 'wb') as f: 
             cloudpickle.dump((p_params, v_params), f)
     
     epi_i += 1
 
-# %%
+# # %%
+# with open('../models/ppo/Navigation2D/params_-40.54', 'rb') as f: 
+#     (p_params, v_params) = cloudpickle.load(f)
+
+# # %%
+# import matplotlib.pyplot as plt 
+# def render(p_params, env, rng, n_steps):
+#     env.seed(0)
+#     obs = env.reset()
+
+#     plt.scatter(*env._task['goal'], marker='*')
+#     plt.scatter(*env._state, color='r')
+#     xp, yp = obs
+#     rewards = []
+#     actions = []
+#     for _ in range(n_steps):
+#         rng, subkey = jax.random.split(rng, 2)
+#         a, _ = policy(p_params, obs, subkey)
+
+#         obs2, r, done, _ = env.step(a)
+#         x, y = obs2
+#         rewards.append(r)
+#         actions.append(a)
+
+#         if done: break 
+#         plt.plot([xp, x], [yp, y], color='red')
+#         xp, yp = obs2
+#         obs = obs2
+
+#     plt.show()
+#     return sum(rewards), actions
+
+# # %%
+# rng, subrng = jax.random.split(rng)
+# r, actions = render(p_params, env, subrng, 100)
+# print(r)
+
+# # %%
+# # %%
+# # %%
