@@ -17,7 +17,7 @@ config.update("jax_debug_nans", True) # break on nans
 
 #%%
 env_name = 'Navigation2D'
-env = Navigation2DEnv() # maml debug env 
+env = Navigation2DEnv(max_n_steps=200) # maml debug env 
 
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
@@ -30,13 +30,14 @@ assert -a_high == a_low
 
 #%%
 import haiku as hk
+init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
 def _policy_fcn(s):
     log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
     mu = hk.Sequential([
         hk.Linear(100), jax.nn.relu,
         hk.Linear(100), jax.nn.relu,
-        hk.Linear(n_actions), np.tanh 
+        hk.Linear(n_actions, w_init=init_final), np.tanh 
     ])(s) * a_high
     sig = np.exp(log_std)
     return mu, sig
@@ -89,13 +90,20 @@ def policy(params, obs, rng):
     log_prob = dist.log_prob(a)
     return a, log_prob
 
+@jax.jit 
+def eval_policy(params, obs, rng):
+    mu, _ = p_frwd(params, obs)
+    a = mu
+    a = np.clip(a, a_low, a_high)
+    return a, None
+
 def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
     while True: 
         rng, subkey = jax.random.split(rng, 2)
-        a = policy(params, obs, subkey)[0]
-        
+        a = eval_policy(params, obs, subkey)[0]
+        a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
         rewards += r
@@ -109,21 +117,17 @@ def shuffle_rollout(rollout):
     rollout = jax.tree_map(lambda x: x[idxs], rollout, is_leaf=lambda x: hasattr(x, 'shape'))
     return rollout
 
-def first_batch(rollout, n_chunks):
-    batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout, is_leaf=lambda x: hasattr(x, 'shape'))
-    batch = [d[0] for d in batched_rollout] ## only 1 batch
-    return batch
-
 def rollout2batches(rollout, batch_size, n_batches=1):
     assert n_batches == 1
     rollout_len = rollout[0].shape[0]
     n_chunks = rollout_len // batch_size
     # shuffle / de-correlate
     rollout = shuffle_rollout(rollout)
-    if n_chunks == 0: # too small to batch
-        return rollout
-    else: # batch 
-        return first_batch(rollout, n_chunks)
+    if n_chunks == 0: return rollout
+
+    batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout, is_leaf=lambda x: hasattr(x, 'shape'))
+    batch = [d[0] for d in batched_rollout] ## only 1 batch
+    return batch
 
 def get_optim_fcn(optim):
     @jax.jit
@@ -133,6 +137,12 @@ def get_optim_fcn(optim):
         return params, opt_state
     return update_step
 
+def discount_cumsum(l, discount):
+    l = onp.array(l)
+    for i in range(len(l) - 1)[::-1]:
+        l[i] = l[i] + discount * l[i+1]
+    return l 
+
 #%%
 ### optim, lr and alpha update 
 seed = onp.random.randint(1e5) # 0 
@@ -140,6 +150,7 @@ policy_lr = 1e-3
 v_lr = 1e-3
 # ppo 
 gamma = 0.99 
+lmbda = 0.95
 eps = 0.2 
 # maml 
 epochs = 500
@@ -200,29 +211,29 @@ def rollout(env, p_params, rng):
     trajectory = buffer.contents()
     return trajectory 
 
-@jax.jit
-def advantage_vtarget(v_params, trajectory):
-    (obs, _, r, obs2, done, _) = trajectory
-    r = (r - r.mean()) / (r.std() + 1e-10) # normalize
+def advantage_vtarget(v_params, rollout):
+    (obs, _, r, obs2, done, _) = rollout
     
     batch_v_fcn = jax.vmap(partial(v_frwd, v_params))
     v_obs = batch_v_fcn(obs)
     v_obs2 = batch_v_fcn(obs2)
 
-    v_target = r + (1 - done) * gamma * v_obs2
-    advantages = v_target - v_obs
-    advantages = jax.lax.stop_gradient(advantages)
-    v_target = jax.lax.stop_gradient(v_target)
+    # gae
+    deltas = (r + (1 - done) * gamma * v_obs2) - v_obs
+    deltas = jax.lax.stop_gradient(deltas)
+    adv = discount_cumsum(deltas, discount=gamma * lmbda)
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+
+    # reward2go
+    v_target = discount_cumsum(r, discount=gamma)
     
-    # normalize 
-    advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-10)
-    return advantages, v_target
+    return adv, v_target
 
 @jax.jit 
 def post_process_trajectory(v_params, trajectory):
     (obs, a, _, _, _, log_prob) = trajectory
-    advantages, v_target = advantage_vtarget(v_params, trajectory)
     log_prob = jax.lax.stop_gradient(log_prob)
+    advantages, v_target = advantage_vtarget(v_params, trajectory)
     # repackage for ppo_loss
     trajectory = (obs, a, log_prob, v_target, advantages)
     return trajectory
@@ -234,34 +245,34 @@ def get_ppo_trajectory(env, params, rng):
     return traj 
 
 @jax.jit
-def ppo_loss(p_params, v_params, batch):
-    (obs, a, old_log_prob, v_target, advantages) = batch 
+def ppo_loss(p_params, v_params, sample):
+    (obs, a, old_log_prob, v_target, advantages) = sample 
 
     ## critic loss
-    batch_v_fcn = jax.vmap(partial(v_frwd, v_params))
-    v_obs = batch_v_fcn(obs)
+    v_obs = v_frwd(v_params, obs)
     critic_loss = 0.5 * ((v_obs - v_target) ** 2)
 
     ## policy losses 
-    batch_policy = jax.vmap(partial(p_frwd, p_params))
-    mu, sig = batch_policy(obs)
+    mu, sig = p_frwd(p_params, obs)
     dist = distrax.MultivariateNormalDiag(mu, sig)
-    
     # entropy 
-    entropy_loss = -dist.entropy()[:, None]
+    entropy_loss = -dist.entropy()
     # policy gradient 
-    log_probs = dist.log_prob(a)[:, None]
-    ratio = np.exp(log_probs - old_log_prob)
+    log_prob = dist.log_prob(a)
+
+    ratio = np.exp(log_prob - old_log_prob)
     p_loss1 = ratio * advantages
     p_loss2 = np.clip(ratio, 1-eps, 1+eps) * advantages
     policy_loss = -np.fmin(p_loss1, p_loss2)
 
-    loss = policy_loss + critic_loss
-    loss = loss.mean()
+    loss = policy_loss + 0.001 * entropy_loss + critic_loss
 
-    return loss 
+    return loss.sum()
 
-ppo_loss_grad = jax.jit(jax.grad(ppo_loss, argnums=[0,1]))
+def ppo_loss_batch(p_params, v_params, batch):
+    return jax.vmap(partial(ppo_loss, p_params, v_params))(batch).mean()
+
+ppo_loss_grad = jax.jit(jax.grad(ppo_loss_batch, argnums=[0,1]))
 
 @jax.jit
 def sgd_step(params, grads, alpha):
@@ -286,7 +297,7 @@ def maml_loss(params, env, rng):
     inner_params = maml_inner(params, meta_train_traj, alpha, fast_batch_size)
     # meta test
     meta_test_traj = get_ppo_trajectory(env, inner_params, subkeys[1])
-    meta_test_loss = ppo_loss(*inner_params, meta_test_traj)
+    meta_test_loss = ppo_loss_batch(*inner_params, meta_test_traj)
     return meta_test_loss
 
 def maml_eval(env, params, rng, n_steps=1):
