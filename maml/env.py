@@ -54,6 +54,7 @@ class Navigation2DEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(action, -0.1, 0.1)
+        action = np.array(action)
         assert self.action_space.contains(action)
         self._state = self._state + action
 

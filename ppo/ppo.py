@@ -13,32 +13,32 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
-# env_name = 'Pendulum-v0'
-# make_env = lambda: gym.make(env_name)
+env_name = 'Pendulum-v0'
+make_env = lambda: gym.make(env_name)
 
-from env import Navigation2DEnv
-env_name = 'Navigation2D'
-def make_env():
-    env = Navigation2DEnv(max_n_steps=200)
-    env.seed(0)
-    task = env.sample_tasks(1)[0]
-    print(f'[LOGGER]: task = {task}')
-    env.reset_task(task)
+# from env import Navigation2DEnv
+# env_name = 'Navigation2D'
+# def make_env():
+#     env = Navigation2DEnv(max_n_steps=200)
+#     env.seed(0)
+#     task = env.sample_tasks(1)[0]
+#     print(f'[LOGGER]: task = {task}')
+#     env.reset_task(task)
 
-    # log max reward 
-    goal = env._task['goal']
-    reward = 0 
-    step_count = 0 
-    obs = env.reset()
-    while True: 
-        a = goal - obs 
-        obs2, r, done, _ = env.step(a)
-        reward += r
-        step_count += 1 
-        if done: break 
-        obs = obs2
-    print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
-    return env 
+#     # log max reward 
+#     goal = env._task['goal']
+#     reward = 0 
+#     step_count = 0 
+#     obs = env.reset()
+#     while True: 
+#         a = goal - obs 
+#         obs2, r, done, _ = env.step(a)
+#         reward += r
+#         step_count += 1 
+#         if done: break 
+#         obs = obs2
+#     print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+#     return env 
 
 env = make_env()
 n_actions = env.action_space.shape[0]
@@ -101,7 +101,8 @@ def eval(params, env, rng):
     obs = env.reset()
     while True: 
         rng, subrng = jax.random.split(rng)
-        a = eval_policy(params, obs, subrng)[0]
+        # a = eval_policy(params, obs, subrng)[0]
+        a = policy(params, obs, subrng)[0]
         a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
@@ -134,7 +135,7 @@ def shuffle_rollout(rollout):
     rollout_len = rollout[0].shape[0]
     idxs = onp.arange(rollout_len) 
     onp.random.shuffle(idxs)
-    rollout = jax.tree_map(lambda x: x[idxs], rollout, is_leaf=lambda x: hasattr(x, 'shape'))
+    rollout = jax.tree_map(lambda x: x[idxs], rollout)
     return rollout
 
 def rollout2batches(rollout, batch_size):
@@ -144,7 +145,7 @@ def rollout2batches(rollout, batch_size):
     rollout = shuffle_rollout(rollout)
     if n_chunks == 0: return rollout
     # batch 
-    batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout, is_leaf=lambda x: hasattr(x, 'shape'))
+    batched_rollout = jax.tree_map(lambda x: np.array_split(x, n_chunks), rollout)
     for i in range(n_chunks):
         batch = [d[i] for d in batched_rollout]
         yield batch 
@@ -179,7 +180,7 @@ def ppo_loss(p_params, v_params, sample):
 
     ## critic loss
     v_obs = v_frwd(v_params, obs)
-    critic_loss = 0.5 * ((v_obs - v_target) ** 2)
+    critic_loss = (0.5 * ((v_obs - v_target) ** 2)).sum()
 
     ## policy losses 
     mu, sig = p_frwd(p_params, obs)
@@ -189,19 +190,28 @@ def ppo_loss(p_params, v_params, sample):
     # policy gradient 
     log_prob = dist.log_prob(a)
 
+    approx_kl = (old_log_prob - log_prob).sum()
     ratio = np.exp(log_prob - old_log_prob)
     p_loss1 = ratio * advantages
     p_loss2 = np.clip(ratio, 1-eps, 1+eps) * advantages
-    policy_loss = -np.fmin(p_loss1, p_loss2)
+    policy_loss = -np.fmin(p_loss1, p_loss2).sum()
+
+    clipped_mask = ((ratio > 1+eps) | (ratio < 1-eps)).astype(np.float32)
+    clip_frac = clipped_mask.mean()
 
     loss = policy_loss + 0.001 * entropy_loss + critic_loss
 
-    return loss.sum()
+    info = dict(ploss=policy_loss, entr=-entropy_loss, vloss=critic_loss, 
+        approx_kl=approx_kl, cf=clip_frac)
+
+    return loss, info
 
 def ppo_loss_batch(p_params, v_params, batch):
-    return jax.vmap(partial(ppo_loss, p_params, v_params))(batch).mean()
+    out = jax.vmap(partial(ppo_loss, p_params, v_params))(batch)
+    loss, info = jax.tree_map(lambda x: x.mean(), out)
+    return loss, info
 
-ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss_batch, argnums=[0,1]))
+ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss_batch, argnums=[0,1], has_aux=True))
 
 def optim_update_fcn(optim):
     @jax.jit
@@ -213,10 +223,10 @@ def optim_update_fcn(optim):
 
 @jax.jit
 def ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch):
-    loss, (p_grads, v_grads) = ppo_loss_grad(p_params, v_params, batch)
+    (loss, info), (p_grads, v_grads) = ppo_loss_grad(p_params, v_params, batch)
     p_params, p_opt_state = p_update_step(p_params, p_grads, p_opt_state)
     v_params, v_opt_state = v_update_step(v_params, v_grads, v_opt_state)
-    return loss, p_params, v_params, p_opt_state, v_opt_state
+    return loss, info, p_params, v_params, p_opt_state, v_opt_state
 
 class Worker:
     def __init__(self, n_steps):
@@ -250,7 +260,7 @@ class Worker:
         return rollout
 
 #%%
-seed = onp.random.randint(1e5)
+seed = onp.random.randint(1e5) # 90897 works very well 
 gamma = 0.99 
 lmbda = 0.95
 eps = 0.2
@@ -301,16 +311,14 @@ while step_i < max_n_steps:
     rollout = worker.rollout(p_params, v_params, subkey) 
 
     for batch in rollout2batches(rollout, batch_size):
-        loss, p_params, v_params, p_opt_state, v_opt_state = \
+        loss, info, p_params, v_params, p_opt_state, v_opt_state = \
             ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch)
         step_i += 1 
         pbar.update(1)
         writer.add_scalar('loss/loss', loss.item(), step_i)
+        for k in info.keys(): 
+            writer.add_scalar(f'info/{k}', info[k].item(), step_i)
 
-    log_std = p_params['~']['log_std']
-    log_std = log_std.item() if n_actions == 1 else log_std.mean().item()
-    writer.add_scalar('policy/log_std', log_std, step_i)
-    
     rng, subrng = jax.random.split(rng)
     reward = eval(p_params, env, subrng) 
     writer.add_scalar('eval/total_reward', reward.item(), step_i)
