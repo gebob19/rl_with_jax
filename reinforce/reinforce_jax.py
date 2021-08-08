@@ -20,12 +20,13 @@ obs_dim = env.observation_space.shape[0]
 
 #%%
 import haiku as hk 
+init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
 def _policy_fcn(obs):
     a_probs = hk.Sequential([
         hk.Linear(32), jax.nn.relu,
         hk.Linear(32), jax.nn.relu,
-        hk.Linear(n_actions), jax.nn.softmax
+        hk.Linear(n_actions, w_init=init_final), jax.nn.softmax
     ])(obs)
     return a_probs 
 
@@ -45,11 +46,13 @@ def reward2go(r, gamma=0.99):
     r = (r - r.mean()) / (r.std() + 1e-8)
     return r 
 
-@jax.jit    
+@jax.jit
 def policy(p_params, obs, rng):
     a_probs = p_frwd(p_params, obs)
-    a = distrax.Categorical(probs=a_probs).sample(seed=rng)        
-    return a
+    dist = distrax.Categorical(probs=a_probs)
+    a = dist.sample(seed=rng)
+    entropy = dist.entropy()
+    return a, entropy
 
 def rollout(p_params, rng):
     global step_count
@@ -58,7 +61,10 @@ def rollout(p_params, rng):
     obs = env.reset()
     while True: 
         rng, subkey = jax.random.split(rng, 2) 
-        a = policy(p_params, obs, subkey).item()
+        a, entropy = policy(p_params, obs, subkey)
+        a = a.item()
+
+        writer.add_scalar('policy/entropy', entropy.item(), step_count)
 
         obs2, r, done, _ = env.step(a)
         step_count += 1
@@ -90,7 +96,7 @@ def batch_reinforce_loss(params, batch):
 # %%
 seed = onp.random.randint(1e5)
 policy_lr = 1e-3
-batch_size = 64 
+batch_size = 32
 max_n_steps = 100000
 
 rng = jax.random.PRNGKey(seed)
@@ -136,8 +142,13 @@ while step_count < max_n_steps:
 
     epi_i += 1
     if epi_i % batch_size == 0:
-        grad = jax.tree_multimap(lambda *x: sum(x), *gradients)
-        p_params, p_opt_state = update_step(p_params, grad, p_opt_state)
+        grads = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
+        p_params, p_opt_state = update_step(p_params, grads, p_opt_state)
+
+        for i, g in enumerate(jax.tree_leaves(grads)): 
+            name = 'b' if len(g.shape) == 1 else 'w'
+            writer.add_histogram(f'{name}_{i}_grad', onp.array(g), epi_i)
+
         gradients = []
 
 # %%

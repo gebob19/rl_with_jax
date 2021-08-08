@@ -11,50 +11,35 @@ from functools import partial
 import ray 
 import pybullet_envs
 
-ray.init()
+ray.init(ignore_reinit_error=True)
 
 #%%
-# env_name = 'Pendulum-v0'
-# # env_name = 'HalfCheetahBulletEnv-v0'
-# env = gym.make(env_name)
+env_name = 'CartPole-v0'
+env = gym.make(env_name)
 
-from env import Navigation2DEnv
-env_name = 'Navigation2D'
-def make_env():
-    env = Navigation2DEnv()
-    env.seed(0)
-    task = env.sample_tasks(1)[0]
-    env.reset_task(task)
-    return env 
-env = make_env()
-
-n_actions = env.action_space.shape[0]
+n_actions = env.action_space.n
 obs_dim = env.observation_space.shape[0]
 
-a_high = env.action_space.high[0]
-a_low = env.action_space.low[0]
-
-print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
-assert -a_high == a_low
+print(f'[LOGGER] n_actions: {n_actions} obs_dim: {obs_dim}')
 
 #%%
 import haiku as hk
 
+init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
+
 def _policy_fcn(s):
-    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
-    mu = hk.Sequential([
+    pi = hk.Sequential([
         hk.Linear(64), jax.nn.relu,
         hk.Linear(64), jax.nn.relu,
-        hk.Linear(n_actions), np.tanh 
-    ])(s) * a_high
-    sig = np.exp(log_std)
-    return mu, sig
+        hk.Linear(n_actions, w_init=init_final), jax.nn.softmax
+    ])(s)
+    return pi
 
 def _critic_fcn(s):
     v = hk.Sequential([
         hk.Linear(64), jax.nn.relu,
         hk.Linear(64), jax.nn.relu,
-        hk.Linear(1), 
+        hk.Linear(1, w_init=init_final), 
     ])(s)
     return v 
 
@@ -63,13 +48,13 @@ class Vector_ReplayBuffer:
         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
         self.i = 0
         # obs, obs2, a, r, done
-        self.splits = [obs_dim, obs_dim+n_actions, obs_dim+n_actions+1, obs_dim*2+1+n_actions, obs_dim*2+1+n_actions+1]
+        self.splits = [obs_dim, obs_dim+1, obs_dim+1+1, obs_dim*2+1+1, obs_dim*2+1+1+1]
         self.clear()
 
     def push(self, sample):
         assert self.i < self.buffer_capacity # dont let it get full
         (obs, a, r, obs2, done, log_prob) = sample
-        self.buffer[self.i] = onp.array([*obs, *onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
+        self.buffer[self.i] = onp.array([*obs, onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
         self.i += 1 
 
     def contents(self):
@@ -77,7 +62,7 @@ class Vector_ReplayBuffer:
 
     def clear(self):
         self.i = 0 
-        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
+        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + 1 + 2 + 1))
 
 policy_fcn = hk.transform(_policy_fcn)
 policy_fcn = hk.without_apply_rng(policy_fcn)
@@ -92,11 +77,9 @@ def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
     while True: 
-        mu, sig = p_frwd(params, obs)
+        pi = p_frwd(params, obs)
         rng, subrng = jax.random.split(rng)
-        dist = distrax.MultivariateNormalDiag(mu, sig)
-        a = dist.sample(seed=subrng)
-        a = np.clip(a, a_low, a_high)
+        a = distrax.Categorical(probs=pi).sample(seed=subrng).item()
 
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
@@ -135,8 +118,8 @@ def ppo_loss(p_params, v_params, batch):
 
     ## policy losses 
     batch_policy = jax.vmap(partial(p_frwd, p_params))
-    mu, sig = batch_policy(obs)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
+    pi = batch_policy(obs)
+    dist = distrax.Categorical(probs=pi)
     # entropy 
     entropy_loss = -dist.entropy()[:, None]
     # policy gradient 
@@ -175,8 +158,8 @@ class Worker:
 
         self.buffer = Vector_ReplayBuffer(1e6)
         import pybullet_envs
-        # self.env = gym.make(env_name)
-        self.env = make_env()
+        self.env = gym.make(env_name)
+        # self.env = make_env()
         self.obs = self.env.reset()
 
     def compute_advantages(self, v_params, rollout):
@@ -200,12 +183,10 @@ class Worker:
         self.buffer.clear()
         
         for _ in range(self.n_steps): # rollout 
-            mu, sig = self.p_frwd(p_params, self.obs)
-
+            pi = self.p_frwd(p_params, self.obs)
             rng, subrng = jax.random.split(rng)
-            dist = distrax.MultivariateNormalDiag(mu, sig)
-            a = dist.sample(seed=subrng)
-            a = np.clip(a, a_low, a_high)
+            dist = distrax.Categorical(probs=pi)
+            a = dist.sample(seed=subrng).item()
             log_prob = dist.log_prob(a)
             
             obs2, r, done, _ = self.env.step(a)
@@ -234,7 +215,7 @@ batch_size = 32
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = 100 #env._max_episode_steps
+n_step_rollout = env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -280,7 +261,7 @@ while step_i < max_n_steps:
         writer.add_scalar('loss/loss', loss.item(), step_i)
 
     reward = eval(p_params, env, subkeys[-1])
-    writer.add_scalar('eval/total_reward', reward.item(), step_i)
+    writer.add_scalar('eval/total_reward', reward, step_i)
 
 #%%
 #%%

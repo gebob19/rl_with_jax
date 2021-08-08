@@ -21,14 +21,14 @@ class Navigation2DEnv(gym.Env):
         super(Navigation2DEnv, self).__init__()
         self.low = low
         self.high = high
-        self.max_n_steps = max_n_steps 
+        self.max_n_steps = max_n_steps
+        self._step_count = 0 
 
         self.observation_space = spaces.Box(low=-np.inf, high=np.inf,
             shape=(2,), dtype=np.float32)
         self.action_space = spaces.Box(low=-0.1, high=0.1,
             shape=(2,), dtype=np.float32)
 
-        self._step_count = 0 
         self._task = task
         self._goal = task.get('goal', np.zeros(2, dtype=np.float32))
         self._state = np.zeros(2, dtype=np.float32)
@@ -65,37 +65,3 @@ class Navigation2DEnv(gym.Env):
         self._step_count += 1 
 
         return self._state, reward, done, {'task': self._task}
-
-
-# #%%
-# import time 
-
-# start = time.time()
-# env = Navigation2DEnv() # maml debug env 
-# task = {'goal': np.array([1., 1.])}
-# env.reset_task(task)
-# env.reset()
-# while True:
-#     a = np.array([1., 1.])
-#     obs2, r, done, _ = env.step(a)
-#     if done: break 
-# print(time.time() - start)
-
-#%%
-# env.reset_task(task)
-
-# # %%
-# import time 
-
-# env.seed(0)
-# start = time.time()
-# env.reset()
-# step = 0 
-# for _ in range(100):
-#     obs2, r, done, _ = env.step(env.action_space.sample())
-#     if done: break 
-# time.time() - start
-    
-# # %%
-
-# %%
