@@ -52,7 +52,6 @@ def make_env():
     env = FlattenObs(env)
     return env 
 
-#%%
 env_name = 'PongNoFrameskip-v4'
 env = make_env()
 
@@ -61,6 +60,7 @@ obs_dim = env.reset().shape[0]
 
 print(f'[LOGGER] n_actions: {n_actions} obs_dim: {obs_dim}')
 
+#%%
 #%%
 import haiku as hk
 init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
@@ -346,6 +346,41 @@ while step_i < max_n_steps:
     
     epi_i += 1
 
-#%%
-#%%
-#%%
+# #%%
+# path = '../' + str(model_path) + '/params_11.00'
+# with open(path, 'rb') as f: 
+#     (p_params, v_params) = cloudpickle.load(f)
+
+# og_obs_dim = (84, 84, 1)
+# def eval(params, env, rng):
+#     rewards = 0 
+#     imgs = []
+#     obs = env.reset()
+#     while True: 
+#         imgs.append(obs.reshape(og_obs_dim))
+#         rng, subrng = jax.random.split(rng)
+#         a = policy(params, obs, subrng)[0].item()
+#         obs2, r, done, _ = env.step(a)        
+#         obs = obs2 
+#         rewards += r
+#         if done: break 
+#     imgs = np.stack(imgs)
+#     return imgs, rewards
+
+# #%%
+# imgs, r = eval(p_params, env, rng)
+# imgs.shape, r
+
+# # %%
+# import cv2 
+# h, w, _ = imgs[0].shape
+# fourcc = cv2.VideoWriter_fourcc(*'XVID')
+# video = cv2.VideoWriter(f'{env_name}_{r:.2f}.mp4', fourcc, 20, (w, h))
+# from tqdm.notebook import tqdm 
+# for img in tqdm(imgs):
+#     img = cv2.cvtColor(img * 255., cv2.COLOR_GRAY2BGR)
+#     img = img.astype(onp.uint8)
+#     video.write(img)
+# cv2.destroyAllWindows()
+# video.release()
+# # %%
