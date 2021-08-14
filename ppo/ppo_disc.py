@@ -8,6 +8,10 @@ import gym
 from functools import partial
 import cloudpickle
 
+from jax.config import config
+config.update("jax_enable_x64", True) 
+config.update("jax_debug_nans", True) # break on nans
+
 env_name = 'CartPole-v0'
 env = gym.make(env_name)
 
