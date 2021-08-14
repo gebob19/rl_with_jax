@@ -13,8 +13,44 @@ import cloudpickle
 ray.init(ignore_reinit_error=True)
 
 #%%
-env_name = 'CartPole-v0'
-env = gym.make(env_name)
+from baselines.common.atari_wrappers import FireResetEnv, WarpFrame, \
+    ScaledFloatFrame, NoopResetEnv, DiffFrame
+
+class DiffFrame(gym.Wrapper):
+    def __init__(self, env):
+        super().__init__(env)
+        self.prev_frame = None 
+    
+    def reset(self):
+        obs = self.env.reset()
+        obs2, _, _, _ = self.env.step(0) # NOOP 
+        obs = obs2 - obs 
+        self.prev_frame = obs2 
+        return obs 
+    
+    def step(self, a):
+        obs2, r, done, info = self.env.step(a) 
+        obs = obs2 - self.prev_frame
+        self.prev_frame = obs2 
+        return obs, r, done, info
+
+class FlattenObs(gym.ObservationWrapper):
+    def observation(self, obs):
+        return obs.flatten()
+
+def make_env():
+    env = gym.make(env_name)
+    env = FireResetEnv(env)
+    env = NoopResetEnv(env, noop_max=50)
+    env = WarpFrame(env)
+    env = ScaledFloatFrame(env)
+    env = DiffFrame(env)
+    env = FlattenObs(env)
+    return env 
+
+#%%
+env_name = 'PongNoFrameskip-v4'
+env = make_env()
 
 n_actions = env.action_space.n
 obs_dim = env.observation_space.shape[0]
@@ -27,16 +63,16 @@ init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
 def _policy_fcn(s):
     pi = hk.Sequential([
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(64), jax.nn.relu,
+        hk.Linear(128), jax.nn.relu,
+        hk.Linear(128), jax.nn.relu,
         hk.Linear(n_actions, w_init=init_final), jax.nn.softmax
     ])(s)
     return pi
 
 def _critic_fcn(s):
     v = hk.Sequential([
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(64), jax.nn.relu,
+        hk.Linear(128), jax.nn.relu,
+        hk.Linear(128), jax.nn.relu,
         hk.Linear(1, w_init=init_final), 
     ])(s)
     return v 
@@ -169,8 +205,8 @@ class Worker:
 
         self.buffer = Vector_ReplayBuffer(1e6)
         import pybullet_envs
-        self.env = gym.make(env_name)
-        # self.env = make_env()
+        # self.env = gym.make(env_name)
+        self.env = make_env()
         self.obs = self.env.reset()
 
     def compute_advantage_targets(self, v_params, rollout):
