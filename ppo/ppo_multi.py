@@ -255,7 +255,7 @@ class Worker:
 #%%
 n_envs = 4
 
-seed = 90897 # onp.random.randint(1e5)
+seed = onp.random.randint(1e5) # 90897 works well for pendulum 
 gamma = 0.99 
 lmbda = 0.95
 eps = 0.2
