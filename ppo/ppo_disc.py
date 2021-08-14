@@ -183,8 +183,6 @@ class Worker:
     def rollout(self, p_params, v_params, rng):
         self.buffer.clear()
         
-        import time 
-        s = time.time()
         for _ in range(self.n_steps): # rollout 
             rng, subrng = jax.random.split(rng)
             a, log_prob = policy(p_params, self.obs, subrng)
@@ -196,8 +194,6 @@ class Worker:
             self.obs = obs2
             if done: 
                 self.obs = self.env.reset()
-
-        print(f'rollout: {time.time() - s}')
 
         # update rollout contents 
         rollout = self.buffer.contents()
