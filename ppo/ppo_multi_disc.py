@@ -14,7 +14,7 @@ ray.init(ignore_reinit_error=True)
 
 #%%
 from baselines.common.atari_wrappers import FireResetEnv, WarpFrame, \
-    ScaledFloatFrame, NoopResetEnv, DiffFrame
+    ScaledFloatFrame, NoopResetEnv
 
 class DiffFrame(gym.Wrapper):
     def __init__(self, env):
@@ -53,7 +53,7 @@ env_name = 'PongNoFrameskip-v4'
 env = make_env()
 
 n_actions = env.action_space.n
-obs_dim = env.observation_space.shape[0]
+obs_dim = env.reset().shape[0]
 
 print(f'[LOGGER] n_actions: {n_actions} obs_dim: {obs_dim}')
 
@@ -158,41 +158,54 @@ def ppo_loss(p_params, v_params, sample):
 
     ## critic loss
     v_obs = v_frwd(v_params, obs)
-    critic_loss = 0.5 * ((v_obs - v_target) ** 2)
+    critic_loss = (0.5 * ((v_obs - v_target) ** 2)).sum()
 
     ## policy losses 
     pi = p_frwd(p_params, obs)
     dist = distrax.Categorical(probs=pi)
+
     # entropy 
     entropy_loss = -dist.entropy()
     # policy gradient 
     log_prob = dist.log_prob(a)
 
+    approx_kl = (old_log_prob - log_prob).sum()
     ratio = np.exp(log_prob - old_log_prob)
     p_loss1 = ratio * advantages
     p_loss2 = np.clip(ratio, 1-eps, 1+eps) * advantages
-    policy_loss = -np.fmin(p_loss1, p_loss2)
+    policy_loss = -np.fmin(p_loss1, p_loss2).sum()
+
+    clipped_mask = ((ratio > 1+eps) | (ratio < 1-eps)).astype(np.float32)
+    clip_frac = clipped_mask.mean()
 
     loss = policy_loss + 0.001 * entropy_loss + critic_loss
 
-    return loss.sum()
+    info = dict(ploss=policy_loss, entr=-entropy_loss, vloss=critic_loss, 
+        approx_kl=approx_kl, cf=clip_frac)
+
+    return loss, info
 
 def ppo_loss_batch(p_params, v_params, batch):
-    return jax.vmap(partial(ppo_loss, p_params, v_params))(batch).mean()
+    out = jax.vmap(partial(ppo_loss, p_params, v_params))(batch)
+    loss, info = jax.tree_map(lambda x: x.mean(), out)
+    return loss, info
 
-ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss_batch, argnums=[0,1]))
+ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss_batch, argnums=[0,1], has_aux=True))
 
-def update_step(params, grads, optim, opt_state):
-    grads, opt_state = optim.update(grads, opt_state)
-    params = optax.apply_updates(params, grads)
-    return params, opt_state
+def optim_update_fcn(optim):
+    @jax.jit
+    def update_step(params, grads, opt_state):
+        grads, opt_state = optim.update(grads, opt_state)
+        params = optax.apply_updates(params, grads)
+        return params, opt_state
+    return update_step
 
 @jax.jit
 def ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch):
-    loss, (p_grads, v_grads) = ppo_loss_grad(p_params, v_params, batch)
-    p_params, p_opt_state = update_step(p_params, p_grads, p_optim, p_opt_state)
-    v_params, v_opt_state = update_step(v_params, v_grads, v_optim, v_opt_state)
-    return loss, p_params, v_params, p_opt_state, v_opt_state
+    (loss, info), (p_grads, v_grads) = ppo_loss_grad(p_params, v_params, batch)
+    p_params, p_opt_state = p_update_step(p_params, p_grads, p_opt_state)
+    v_params, v_opt_state = v_update_step(v_params, v_grads, v_opt_state)
+    return loss, info, p_params, v_params, p_opt_state, v_opt_state
 
 #%%
 @ray.remote
@@ -253,17 +266,17 @@ class Worker:
         return rollout
 
 #%%
-n_envs = 3
+n_envs = 20
 
 seed = onp.random.randint(1e5)
 gamma = 0.99 
 lmbda = 0.95
 eps = 0.2
-batch_size = 32 
+batch_size = 128
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = env._max_episode_steps
+n_step_rollout = 2048 #env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -284,6 +297,13 @@ v_optim = optimizer(v_lr)
 p_opt_state = p_optim.init(p_params)
 v_opt_state = v_optim.init(v_params)
 
+p_update_step = optim_update_fcn(p_optim)
+v_update_step = optim_update_fcn(v_optim)
+
+import pathlib 
+model_path = pathlib.Path(f'./models/ppo/{env_name}')
+model_path.mkdir(exist_ok=True, parents=True)
+
 #%%
 from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter(comment=f'ppo_multi_{n_envs}_{env_name}_seed={seed}_nrollout={n_step_rollout}')
@@ -292,6 +312,7 @@ writer = SummaryWriter(comment=f'ppo_multi_{n_envs}_{env_name}_seed={seed}_nroll
 workers = [Worker.remote(n_step_rollout) for _ in range(n_envs)]
 
 step_i = 0 
+epi_i = 0 
 from tqdm import tqdm 
 pbar = tqdm(total=max_n_steps)
 while step_i < max_n_steps:
@@ -302,14 +323,24 @@ while step_i < max_n_steps:
 
     ## update
     for batch in rollout2batches(rollout, batch_size):
-        loss, p_params, v_params, p_opt_state, v_opt_state = \
+        loss, info, p_params, v_params, p_opt_state, v_opt_state = \
             ppo_step(p_params, v_params, p_opt_state, v_opt_state, batch)
         step_i += 1 
         pbar.update(1)
         writer.add_scalar('loss/loss', loss.item(), step_i)
+        for k in info.keys(): 
+            writer.add_scalar(f'info/{k}', info[k].item(), step_i)
 
     reward = eval(p_params, env, subkeys[-1])
     writer.add_scalar('eval/total_reward', reward, step_i)
+
+    if epi_i == 0 or reward > max_reward: 
+        print(f'new max reward: {reward} ... saving model ...')
+        max_reward = reward
+        with open(str(model_path/f'params_{max_reward:.2f}'), 'wb') as f: 
+            cloudpickle.dump((p_params, v_params), f)
+    
+    epi_i += 1
 
 #%%
 #%%
