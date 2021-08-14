@@ -227,7 +227,7 @@ batch_size = 32
 policy_lr = 1e-3
 v_lr = 1e-3
 max_n_steps = 1e6
-n_step_rollout = 200 #env._max_episode_steps
+n_step_rollout = env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)

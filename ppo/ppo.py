@@ -254,7 +254,6 @@ class Worker:
         rollout = self.buffer.contents()
         advantages, v_target = compute_advantage_targets(v_params, rollout)
         (obs, a, r, _, _, log_prob) = rollout
-        log_prob = jax.lax.stop_gradient(log_prob)
         rollout = (obs, a, log_prob, v_target, advantages)
 
         return rollout
