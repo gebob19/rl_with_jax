@@ -382,7 +382,7 @@ print(f'[LOGGER]: n_tasks_per_step = {len(tasks)}')
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'MAMLppo_noValue_{env_name}_seed={seed}')
+writer = SummaryWriter(comment=f'MAMLppo_noValue_{n_tasks}task_{env_name}_seed={seed}')
 
 from tqdm import tqdm 
 for e in tqdm(range(1, epochs+1)):
