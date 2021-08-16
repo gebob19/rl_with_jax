@@ -329,7 +329,7 @@ def maml_eval(p_params, env, rng, n_steps=1):
 
 #%%
 env.seed(seed)
-n_tasks = 1 
+n_tasks = 2
 task = env.sample_tasks(1)[0] 
 assert n_tasks in [1, 2] 
 if n_tasks == 1: 
@@ -358,7 +358,7 @@ print(f'[LOGGER]: n_tasks_per_step = {len(tasks)}')
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'MAMLppo_noValue_{env_name}_seed={seed}')
+writer = SummaryWriter(comment=f'MAMLppo_noValue_{n_tasks}task_{env_name}_seed={seed}')
 
 from tqdm import tqdm 
 for e in tqdm(range(1, epochs+1)):
