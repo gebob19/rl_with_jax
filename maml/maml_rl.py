@@ -42,14 +42,6 @@ def _policy_fcn(s):
     sig = np.exp(log_std)
     return mu, sig
 
-def _critic_fcn(s):
-    v = hk.Sequential([
-        hk.Linear(100), jax.nn.relu,
-        hk.Linear(100), jax.nn.relu,
-        hk.Linear(1), 
-    ])(s)
-    return v 
-
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
@@ -74,10 +66,6 @@ class Vector_ReplayBuffer:
 policy_fcn = hk.transform(_policy_fcn)
 policy_fcn = hk.without_apply_rng(policy_fcn)
 p_frwd = jax.jit(policy_fcn.apply)
-
-critic_fcn = hk.transform(_critic_fcn)
-critic_fcn = hk.without_apply_rng(critic_fcn)
-v_frwd = jax.jit(critic_fcn.apply)
 
 #%%
 @jax.jit 
@@ -146,10 +134,8 @@ def discount_cumsum(l, discount):
 ### optim, lr and alpha update 
 seed = onp.random.randint(1e5) # 0 
 policy_lr = 1e-2
-v_lr = 1e-2
 # ppo 
 gamma = 0.99 
-lmbda = 0.95
 eps = 0.2 
 # maml 
 epochs = 500
@@ -167,7 +153,6 @@ onp.random.seed(seed)
 ## model init
 obs = np.zeros(env.observation_space.shape)  # dummy input 
 p_params = policy_fcn.init(rng, obs) 
-v_params = critic_fcn.init(rng, obs) 
 
 ## optimizers 
 optimizer = lambda lr: optax.chain(
@@ -175,14 +160,10 @@ optimizer = lambda lr: optax.chain(
     optax.scale_by_adam(),
     optax.scale(-lr),
 )
+
 p_optim = optimizer(policy_lr)
-v_optim = optimizer(v_lr)
-
 p_opt_state = p_optim.init(p_params)
-v_opt_state = v_optim.init(v_params)
-
 p_optim_func = get_optim_fcn(p_optim)
-v_optim_func = get_optim_fcn(v_optim)
 
 model_path = pathlib.Path(f'./models/maml/{env_name}')
 model_path.mkdir(exist_ok=True, parents=True)
@@ -196,8 +177,7 @@ def rollout(env, p_params, rng):
     for _ in range(max_n_steps): 
         rng, subkey = jax.random.split(rng, 2)
         a, log_prob = policy(p_params, obs, subkey)
-        
-        # stop the trace! 
+
         a = jax.lax.stop_gradient(a)
         log_prob = jax.lax.stop_gradient(log_prob)
 
@@ -210,119 +190,70 @@ def rollout(env, p_params, rng):
     trajectory = buffer.contents()
     return trajectory 
 
-def advantage_vtarget(v_params, rollout):
-    (obs, _, r, obs2, done, _) = rollout
-    
-    batch_v_fcn = jax.vmap(partial(v_frwd, v_params))
-    v_obs = batch_v_fcn(obs)
-    v_obs2 = batch_v_fcn(obs2)
-
-    # gae
-    deltas = (r + (1 - done) * gamma * v_obs2) - v_obs
-    deltas = jax.lax.stop_gradient(deltas)
-    adv = discount_cumsum(deltas, discount=gamma * lmbda)
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-
-    # reward2go
-    v_target = discount_cumsum(r, discount=gamma)
-    
-    return adv, v_target
-
-def post_process_trajectory(v_params, trajectory):
-    (obs, a, _, _, _, log_prob) = trajectory
-    advantages, v_target = advantage_vtarget(v_params, trajectory)
-    # repackage for ppo_loss
-    trajectory = (obs, a, log_prob, v_target, advantages)
+def post_process_trajectory(trajectory):
+    (obs, a, r, _, _, _) = trajectory
+    r = discount_cumsum(r, discount=gamma)
+    trajectory = (obs, a, r)
     return trajectory
 
-def get_ppo_trajectory(env, params, rng):
-    p_params, v_params = params
+def get_trajectory(env, p_params, rng):
     traj = rollout(env, p_params, rng)
-    traj = post_process_trajectory(v_params, traj)
+    traj = post_process_trajectory(traj)
     return traj 
 
 @jax.jit
-def ppo_loss(p_params, v_params, sample):
-    (obs, a, old_log_prob, v_target, advantages) = sample 
-
-    ## critic loss
-    v_obs = v_frwd(v_params, obs)
-    critic_loss = (0.5 * ((v_obs - v_target) ** 2)).sum()
-
-    ## policy losses 
+def reinforce_loss(p_params, sample):
+    obs, a, r = sample
     mu, sig = p_frwd(p_params, obs)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
-    # entropy 
-    entropy_loss = -dist.entropy()
-    # policy gradient 
-    log_prob = dist.log_prob(a)
-
-    approx_kl = (old_log_prob - log_prob).sum()
-    ratio = np.exp(log_prob - old_log_prob)
-    p_loss1 = ratio * advantages
-    p_loss2 = np.clip(ratio, 1-eps, 1+eps) * advantages
-    policy_loss = -np.fmin(p_loss1, p_loss2).sum()
-
-    clipped_mask = ((ratio > 1+eps) | (ratio < 1-eps)).astype(np.float32)
-    clip_frac = clipped_mask.mean()
-
-    loss = policy_loss + 0.001 * entropy_loss + critic_loss
-
-    info = dict(ploss=policy_loss, entr=-entropy_loss, vloss=critic_loss, 
-        approx_kl=approx_kl, cf=clip_frac)
-
+    log_prob = distrax.MultivariateNormalDiag(mu, sig).log_prob(a)
+    loss = -(log_prob * r).sum()
+    info = dict()
     return loss, info
 
-def ppo_loss_batch(p_params, v_params, batch):
-    out = jax.vmap(partial(ppo_loss, p_params, v_params))(batch)
+def loss_batch(p_params, batch):
+    out = jax.vmap(partial(reinforce_loss, p_params))(batch)
     loss, info = jax.tree_map(lambda x: x.mean(), out)
     return loss, info
 
-ppo_loss_grad = jax.jit(jax.value_and_grad(ppo_loss_batch, argnums=[0,1], has_aux=True))
+loss_grad = jax.jit(jax.value_and_grad(loss_batch, has_aux=True))
 
 @jax.jit
 def sgd_step(params, grads, alpha):
     sgd_update = lambda param, grad: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads)
 
-def maml_inner(params, trajectory, alpha, batch_size):
-    p_params, v_params = params
-
+def maml_inner(p_params, trajectory, alpha, batch_size):
     batch = rollout2batches(trajectory, batch_size, n_batches=1)
-    (_, info), (p_g, v_g) = ppo_loss_grad(*params, batch)
+    (_, info), p_g = loss_grad(p_params, batch)
 
     inner_params_p = sgd_step(p_params, p_g, alpha)
-    inner_params_v = sgd_step(v_params, v_g, alpha)
-
-    return (inner_params_p, inner_params_v), info
+    return inner_params_p, info
 
 def maml_loss(params, env, rng):
     subkeys = jax.random.split(rng, 2)
     # meta train
-    meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
+    meta_train_traj = get_trajectory(env, params, subkeys[0])
     inner_params, _ = maml_inner(params, meta_train_traj, alpha, fast_batch_size)
     # meta test
-    meta_test_traj = get_ppo_trajectory(env, inner_params, subkeys[1])
-    meta_test_loss, _ = ppo_loss_batch(*inner_params, meta_test_traj)
+    meta_test_traj = get_trajectory(env, inner_params, subkeys[1])
+    meta_test_loss, _ = loss_batch(inner_params, meta_test_traj)
     return meta_test_loss
 
 def maml_eval(env, params, rng, n_steps=1):
     rewards = []
     infos = []
     rng, subkey = jax.random.split(rng, 2)
-    reward_0step = eval(params[0], env, subkey)
-    # reward_0step = rollout(env, params[0], subkey)[2].sum()
+    reward_0step = eval(params, env, subkey)
     
     rewards.append(reward_0step)
 
     eval_alpha = alpha
-    for step_i in range(n_steps):
+    for _ in range(n_steps):
         rng, *subkeys = jax.random.split(rng, 3)
-        meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
+        meta_train_traj = get_trajectory(env, params, subkeys[0])
         inner_params, info = maml_inner(params, meta_train_traj, eval_alpha, eval_fast_batch_size)
 
-        r = eval(inner_params[0], env, subkeys[1])
-        # r = rollout(env, inner_params[0], subkeys[1])[2].sum()
+        r = eval(inner_params, env, subkeys[1])
 
         rewards.append(r)
         infos.append(info)
@@ -333,16 +264,38 @@ def maml_eval(env, params, rng, n_steps=1):
 
 #%%
 env.seed(0)
-task = env.sample_tasks(1)[0] ## only two tasks 
-task2 = {'goal': -task['goal'].copy()}
-tasks = [task, task2]
-# tasks = tasks * (task_batch_size//2)
+n_tasks = 1 
+task = env.sample_tasks(1)[0] ## only two tasks
+assert n_tasks in [1, 2] 
+if n_tasks == 1: 
+    tasks = [task] * task_batch_size
+elif n_tasks == 2: 
+    task2 = {'goal': -task['goal'].copy()}
+    tasks = [task, task2] * (task_batch_size//2)
 
+for task in tasks[:n_tasks]: 
+    env.reset_task(task)
+    # log max reward 
+    goal = env._task['goal']
+    reward = 0 
+    step_count = 0 
+    obs = env.reset()
+    while True: 
+        a = goal - obs 
+        obs2, r, done, _ = env.step(a)
+        reward += r
+        step_count += 1 
+        if done: break 
+        obs = obs2
+    print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+    
+
+# tasks = tasks * (task_batch_size//2)
 # tasks = env.sample_tasks(1) * task_batch_size ## only ONE tasks 
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'maml_2task_test_seed={seed}')
+writer = SummaryWriter(comment=f'maml_{n_tasks}task_test_seed={seed}')
 
 #%%
 from tqdm import tqdm 
@@ -350,32 +303,34 @@ from tqdm import tqdm
 step_count = 0 
 for e in tqdm(range(1, epochs+1)):
     # training 
-    params = (p_params, v_params)
     # tasks = env.sample_tasks(task_batch_size)
 
     gradients = []
+    mean_loss = 0
     for task_i, task in enumerate(tqdm(tasks)): 
         env.reset_task(task)
         rng, subkey = jax.random.split(rng, 2)
-        loss, grads = jax.value_and_grad(maml_loss)(params, env, subkey)
+        loss, grads = jax.value_and_grad(maml_loss)(p_params, env, subkey)
         
-        writer.add_scalar(f'loss/task_{task_i}loss', loss.item(), step_count)
+        # writer.add_scalar(f'loss/task_{task_i}loss', loss.item(), step_count)
         
-        for i, g in enumerate(jax.tree_leaves(grads)): 
-            name = 'b' if len(g.shape) == 1 else 'w'
-            writer.add_histogram(f'task_{task_i}_{name}_{i}_grad', onp.array(g), step_count)
+        # for i, g in enumerate(jax.tree_leaves(grads)): 
+        #     name = 'b' if len(g.shape) == 1 else 'w'
+        #     writer.add_histogram(f'task_{task_i}_{name}_{i}_grad', onp.array(g), step_count)
 
         gradients.append(grads)
+        mean_loss += loss 
         step_count += 1 
             
+    mean_loss /= len(tasks)
+    writer.add_scalar(f'loss/mean_task_loss', mean_loss, step_count)
+
     grads = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
     for i, g in enumerate(jax.tree_leaves(grads)): 
         name = 'b' if len(g.shape) == 1 else 'w'
         writer.add_histogram(f'task_{task_i}_{name}_{i}_grad', onp.array(g), step_count)
 
-    p_grad, v_grad = grads
-    p_params, p_opt_state = p_optim_func(p_params, p_grad, p_opt_state)
-    v_params, v_opt_state = v_optim_func(v_params, v_grad, v_opt_state)
+    p_params, p_opt_state = p_optim_func(p_params, grads, p_opt_state)
 
     # eval 
     if e % eval_every == 0:
@@ -386,17 +341,15 @@ for e in tqdm(range(1, epochs+1)):
             env.reset_task(eval_task)
 
             rng, subkey = jax.random.split(rng, 2)
-            rewards, infos = maml_eval(env, (p_params, v_params), subkey, n_steps=3)
+            rewards, infos = maml_eval(env, p_params, subkey, n_steps=3)
             task_rewards.append(rewards)
 
             for step_i, r in enumerate(rewards):
                 writer.add_scalar(f'task{task_i}/reward_{step_i}step', r, e)
-            
 
-            for step_i, info in enumerate(infos):
+            # for step_i, info in enumerate(infos):
             #     for k in info.keys(): 
-                k='vloss'
-                writer.add_scalar(f'task{task_i}/{k}_{step_i}step', info[k].item(), e)
+            #         writer.add_scalar(f'task{task_i}/{k}_{step_i}step', info[k].item(), e)
 
         mean_rewards=[]
         for step_i in range(len(task_rewards[0])):
@@ -433,7 +386,7 @@ for e in tqdm(range(1, epochs+1)):
 # params = (p_params, v_params)
 # for i in range(1, n_steps+1):
 #     rng, *subkeys = jax.random.split(rng, 3)
-#     meta_train_traj = get_ppo_trajectory(env, params, subkeys[0])
+#     meta_train_traj = get_trajectory(env, params, subkeys[0])
 #     inner_params = maml_inner(params, meta_train_traj, eval_alpha, eval_fast_batch_size)
 
 #     rng, subkey = jax.random.split(rng, 2)

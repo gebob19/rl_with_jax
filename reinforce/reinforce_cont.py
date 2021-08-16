@@ -1,3 +1,5 @@
+# doesn't work
+
 #%%
 import jax
 import jax.numpy as np 
@@ -12,19 +14,33 @@ config.update("jax_enable_x64", True)
 config.update("jax_debug_nans", True) # break on nans
 
 #%%
-# env_name = 'CartPole-v0'
-# env = gym.make(env_name)
+env_name = 'Pendulum-v0'
+env = gym.make(env_name)
 
-from env import Navigation2DEnv
-env_name = 'Navigation2D'
-def make_env():
-    env = Navigation2DEnv()
-    env.seed(0)
-    task = env.sample_tasks(1)[0]
-    print(f'LOGGER: task = {task}')
-    env.reset_task(task)
-    return env 
-env = make_env()
+# from env import Navigation2DEnv
+# env_name = 'Navigation2D'
+# def make_env():
+#     env = Navigation2DEnv(max_n_steps=100)
+#     env.seed(0)
+#     task = env.sample_tasks(1)[0]
+#     print(f'LOGGER: task = {task}')
+#     env.reset_task(task)
+
+#     # log max reward 
+#     goal = env._task['goal']
+#     reward = 0 
+#     step_count = 0 
+#     obs = env.reset()
+#     while True: 
+#         a = goal - obs 
+#         obs2, r, done, _ = env.step(a)
+#         reward += r
+#         step_count += 1 
+#         if done: break 
+#         obs = obs2
+#     print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+#     return env 
+# env = make_env()
 
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
@@ -58,26 +74,38 @@ def update_step(params, grads, opt_state):
     params = optax.apply_updates(params, grads)
     return params, opt_state
 
-def reward2go(r, gamma=0.99):
-    for i in range(len(r) - 1)[::-1]:
-        r[i] = r[i] + gamma * r[i+1]
-    r = (r - r.mean()) / (r.std() + 1e-8)
-    return r 
-
-# @jax.jit    
-# def policy(p_params, obs, rng):
-#     a_probs = p_frwd(p_params, obs)
-#     a = distrax.Categorical(probs=a_probs).sample(seed=rng)        
-#     return a
+def discount_cumsum(l, discount):
+    l = onp.array(l)
+    for i in range(len(l) - 1)[::-1]:
+        l[i] = l[i] + discount * l[i+1]
+    return l 
 
 @jax.jit 
 def policy(params, obs, rng):
     mu, sig = p_frwd(params, obs)
-    rng, subrng = jax.random.split(rng)
     dist = distrax.MultivariateNormalDiag(mu, sig)
-    a = dist.sample(seed=subrng)
+    a = dist.sample(seed=rng)
     a = np.clip(a, a_low, a_high)
     return a
+
+@jax.jit 
+def eval_policy(params, obs, _):
+    a, _ = p_frwd(params, obs)
+    a = np.clip(a, a_low, a_high)
+    return a, None
+
+def eval(params, env, rng):
+    rewards = 0 
+    obs = env.reset()
+    while True: 
+        rng, subkey = jax.random.split(rng, 2)
+        a = eval_policy(params, obs, subkey)[0]
+        a = onp.array(a)
+        obs2, r, done, _ = env.step(a)        
+        obs = obs2 
+        rewards += r
+        if done: break 
+    return rewards
 
 def rollout(p_params, rng):
     global step_count
@@ -87,6 +115,7 @@ def rollout(p_params, rng):
     while True: 
         rng, subkey = jax.random.split(rng, 2) 
         a = policy(p_params, obs, subkey)
+        a = onp.array(a)
 
         obs2, r, done, _ = env.step(a)
 
@@ -118,6 +147,7 @@ seed = onp.random.randint(1e5)
 policy_lr = 1e-3
 batch_size = 32
 max_n_steps = 1000
+gamma = 0.99
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -126,16 +156,11 @@ obs = env.reset() # dummy input
 p_params = policy_fcn.init(rng, obs) 
 
 ## optimizers 
-schedule_fn = optax.polynomial_schedule(
-    init_value=-policy_lr, end_value=-1e-8, power=1, 
-    transition_steps=max_n_steps)
-
 p_optim = optax.chain(
     optax.clip_by_global_norm(0.5),
     optax.scale_by_adam(),
-    optax.scale_by_schedule(schedule_fn),
+    optax.scale(-policy_lr),
 )
-# p_optim = optax.sgd(policy_lr)
 
 p_opt_state = p_optim.init(p_params)
 
@@ -158,19 +183,26 @@ while step_count < max_n_steps:
     rng, subkey = jax.random.split(rng, 2) 
     obs, a, r = rollout(p_params, subkey)
     writer.add_scalar('rollout/reward', r.sum().item(), epi_i)
-    r = reward2go(r)
     
+    r = discount_cumsum(r, discount=gamma)
+    r = (r - r.mean()) / (r.std() + 1e-8)
     loss, grad = loss_grad_fcn(p_params, (obs, a, r))
     gradients.append(grad)
     writer.add_scalar('loss/loss', loss.item(), epi_i)
 
     epi_i += 1
     if epi_i % batch_size == 0:
-        grad = jax.tree_multimap(lambda *x: sum(x), *gradients)
+        # update 
+        grad = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
         p_params, p_opt_state = update_step(p_params, grad, p_opt_state)
         step_count += 1
         pbar.update(1)
         gradients = []
+
+        # eval 
+        rng, subkey = jax.random.split(rng, 2) 
+        r = eval(p_params, env, subkey)
+        writer.add_scalar('eval/total_reward', r, epi_i)
 
 # %%
 # %%
