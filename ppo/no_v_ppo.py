@@ -16,28 +16,30 @@ config.update("jax_debug_nans", True) # break on nans
 # env_name = 'Pendulum-v0'
 # make_env = lambda: gym.make(env_name)
 
-from env import Navigation2DEnv
+from env import Navigation2DEnv, Navigation2DEnv_Disc
 env_name = 'Navigation2D'
-def make_env():
-    env = Navigation2DEnv(max_n_steps=200)
-    env.seed(0)
-    task = env.sample_tasks(1)[0]
-    print(f'[LOGGER]: task = {task}')
-    env.reset_task(task)
+def make_env(init_task=False):
+    env = Navigation2DEnv_Disc(max_n_steps=200)
+    
+    if init_task: 
+        env.seed(0)
+        task = env.sample_tasks(1)[0]
+        print(f'[LOGGER]: task = {task}')
+        env.reset_task(task)
 
-    # log max reward 
-    goal = env._task['goal']
-    reward = 0 
-    step_count = 0 
-    obs = env.reset()
-    while True: 
-        a = goal - obs 
-        obs2, r, done, _ = env.step(a)
-        reward += r
-        step_count += 1 
-        if done: break 
-        obs = obs2
-    print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+        # log max reward 
+        goal = env._task['goal']
+        reward = 0 
+        step_count = 0 
+        obs = env.reset()
+        while True: 
+            a = goal - obs 
+            obs2, r, done, _ = env.step(a)
+            reward += r
+            step_count += 1 
+            if done: break 
+            obs = obs2
+        print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
     return env 
 
 env = make_env()
@@ -54,43 +56,59 @@ assert -a_high == a_low
 import haiku as hk
 init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
-def _policy_fcn(s):
-    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
-    mu = hk.Sequential([
+# def _policy_fcn(s):
+#     log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones)
+#     mu = hk.Sequential([
+#         hk.Linear(64), jax.nn.relu,
+#         hk.Linear(64), jax.nn.relu,
+#         hk.Linear(n_actions, w_init=init_final), np.tanh 
+#     ])(s) * a_high
+#     sig = np.exp(log_std)
+#     return mu, sig
+
+def _policy_fcn(obs):
+    a_probs = hk.Sequential([
         hk.Linear(64), jax.nn.relu,
         hk.Linear(64), jax.nn.relu,
-        hk.Linear(n_actions, w_init=init_final), np.tanh 
-    ])(s) * a_high
-    sig = np.exp(log_std)
-    return mu, sig
+        hk.Linear(n_actions, w_init=init_final), jax.nn.softmax
+    ])(obs)
+    return a_probs 
 
 policy_fcn = hk.transform(_policy_fcn)
 policy_fcn = hk.without_apply_rng(policy_fcn)
 p_frwd = jax.jit(policy_fcn.apply)
 
 # %%
-@jax.jit 
-def policy(params, obs, rng):
-    mu, sig = p_frwd(params, obs)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
+# @jax.jit 
+# def policy(params, obs, rng):
+#     mu, sig = p_frwd(params, obs)
+#     dist = distrax.MultivariateNormalDiag(mu, sig)
+#     a = dist.sample(seed=rng)
+#     a = np.clip(a, a_low, a_high)
+#     log_prob = dist.log_prob(a)
+#     return a, log_prob
+
+# @jax.jit 
+# def eval_policy(params, obs, _):
+#     a, _ = p_frwd(params, obs)
+#     a = np.clip(a, a_low, a_high)
+#     return a, None
+
+@jax.jit
+def policy(p_params, obs, rng):
+    a_probs = p_frwd(p_params, obs)
+    dist = distrax.Categorical(probs=a_probs)
     a = dist.sample(seed=rng)
-    a = np.clip(a, a_low, a_high)
     log_prob = dist.log_prob(a)
     return a, log_prob
-
-@jax.jit 
-def eval_policy(params, obs, _):
-    a, _ = p_frwd(params, obs)
-    a = np.clip(a, a_low, a_high)
-    return a, None
 
 def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
     while True: 
         rng, subrng = jax.random.split(rng)
-        a = eval_policy(params, obs, subrng)[0]
-        # a = policy(params, obs, subrng)[0]
+        # a = eval_policy(params, obs, subrng)[0]
+        a = policy(params, obs, subrng)[0]
 
         a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
@@ -148,8 +166,10 @@ def discount_cumsum(l, discount):
 
 def reinforce_loss(p_params, sample):
     (obs, a, _, advantages) = sample
-    mu, sig = p_frwd(p_params, obs)
-    log_prob = distrax.MultivariateNormalDiag(mu, sig).log_prob(a)
+    # mu, sig = p_frwd(p_params, obs)
+    # log_prob = distrax.MultivariateNormalDiag(mu, sig).log_prob(a)
+    a_probs = p_frwd(p_params, obs)
+    log_prob = distrax.Categorical(probs=a_probs).log_prob(a.astype(int))
     loss = -(log_prob * advantages).sum()
     return loss 
 
@@ -172,13 +192,17 @@ def compute_advantage_targets(rollout):
 def ppo_loss(p_params, sample):
     (obs, a, old_log_prob, advantages) = sample 
 
-    ## policy losses 
-    mu, sig = p_frwd(p_params, obs)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
+    # ## policy losses 
+    # mu, sig = p_frwd(p_params, obs)
+    # dist = distrax.MultivariateNormalDiag(mu, sig)
+
+    a_probs = p_frwd(p_params, obs)
+    dist = distrax.Categorical(probs=a_probs)
+
     # entropy 
     entropy_loss = -dist.entropy()
     # policy gradient 
-    log_prob = dist.log_prob(a)
+    log_prob = dist.log_prob(a.astype(int))
 
     approx_kl = (old_log_prob - log_prob).sum()
     ratio = np.exp(log_prob - old_log_prob)
@@ -290,7 +314,7 @@ def maml_inner(p_params, env, rng, fast_batch_size, alpha):
         _, grad = reinforce_loss_grad(p_params, traj)
         gradients.append(grad)
 
-    grad = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
+    grad = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
     inner_params_p = sgd_step(p_params, grad, alpha)
     return inner_params_p
 
@@ -329,7 +353,7 @@ def maml_eval(p_params, env, rng, n_steps=1):
 
 #%%
 env.seed(seed)
-n_tasks = 1 
+n_tasks = 2
 task = env.sample_tasks(1)[0] 
 assert n_tasks in [1, 2] 
 if n_tasks == 1: 

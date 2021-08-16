@@ -12,8 +12,42 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
-env_name = 'CartPole-v0'
-env = gym.make(env_name)
+# env_name = 'CartPole-v0'
+# env = gym.make(env_name)
+
+from env import Navigation2DEnv_Disc
+env_name = 'Navigation2D'
+def make_env(init_task=False):
+    env = Navigation2DEnv_Disc(max_n_steps=200)
+    
+    if init_task: 
+        env.seed(0)
+        task = env.sample_tasks(1)[0]
+        print(f'[LOGGER]: task = {task}')
+        env.reset_task(task)
+
+        # log max reward 
+        goal = env._task['goal']
+        x, y = goal
+        n_right = x / 0.1
+        n_up = y / 0.1
+        action_seq = []
+        for _ in range(int(abs(n_right))): action_seq.append(3 if n_right > 0 else 2)
+        for _ in range(int(abs(n_up))): action_seq.append(0 if n_up > 0 else 1)
+
+        reward = 0 
+        step_count = 0 
+        env.reset()
+        for a in action_seq: 
+            _, r, done, _ = env.step(a)
+            reward += r
+            step_count += 1 
+            if done: break 
+        assert done 
+        print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+    return env 
+
+env = make_env(init_task=True)
 
 n_actions = env.action_space.n
 obs_dim = env.observation_space.shape[0]
@@ -59,15 +93,18 @@ def policy(params, obs, rng):
 
 def eval(params, env, rng):
     rewards = 0 
+    states = []
     obs = env.reset()
     while True: 
+        states.append(obs)
         rng, subrng = jax.random.split(rng)
         a = policy(params, obs, subrng)[0].item()
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
         rewards += r
         if done: break 
-    return rewards
+    states = np.stack(states)
+    return rewards, states
     
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
@@ -181,8 +218,8 @@ class Worker:
         self.n_steps = n_steps
         self.buffer = Vector_ReplayBuffer(1e6)
         # import pybullet_envs
-        # self.env = make_env()
-        self.env = gym.make(env_name)
+        self.env = make_env()
+        # self.env = gym.make(env_name)
         self.obs = self.env.reset()
 
     def rollout(self, p_params, v_params, rng):
@@ -211,14 +248,14 @@ class Worker:
 #%%
 seed = onp.random.randint(1e5)
 
-batch_size = 32 
+batch_size = 64
 policy_lr = 1e-3
 v_lr = 1e-3
 gamma = 0.99 
 lmbda = 0.95
 eps = 0.2
 max_n_steps = 1e6
-n_step_rollout = 200 #env._max_episode_steps
+n_step_rollout = 100 #env._max_episode_steps
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -230,13 +267,16 @@ v_params = critic_fcn.init(rng, obs)
 worker = Worker(n_step_rollout)
 
 ## optimizers 
+    # optax.clip_by_global_norm(0.5),
 optimizer = lambda lr: optax.chain(
-    optax.clip_by_global_norm(0.5),
     optax.scale_by_adam(),
     optax.scale(-lr),
 )
 p_optim = optimizer(policy_lr)
 v_optim = optimizer(v_lr)
+
+# p_optim = optax.sgd(policy_lr)
+# v_optim = optax.sgd(v_lr)
 
 p_opt_state = p_optim.init(p_params)
 v_opt_state = v_optim.init(v_params)
@@ -266,8 +306,18 @@ while step_i < max_n_steps:
         writer.add_scalar('loss/loss', loss.item(), step_i)
 
     rng, subrng = jax.random.split(rng)
-    reward = eval(p_params, env, subrng)
+    reward, states = eval(p_params, env, subrng)
     writer.add_scalar('eval/total_reward', reward, step_i)
+
+    import matplotlib.pyplot as plt 
+    plt.scatter(*env._goal, marker='*')
+    plt.scatter(states[:, 0], states[:, 1], color='b')
+    plt.plot(states[:, 0], states[:, 1], color='b')
+    plt.savefig('tmp.png')
+    plt.close()
+    import cv2 
+    img = cv2.imread('tmp.png').transpose(-1, 0, 1)
+    writer.add_image('eval_rollout', img, step_i)
 
     if epi_i == 0 or reward > max_reward: 
         max_reward = reward
