@@ -1,4 +1,6 @@
-# rl_with_jax
+# RL Implementations in JAX 
+
+Single-file implementations focused on clarity rather than proper code standards :)
 
 DQN: `qlearn.py`
 
