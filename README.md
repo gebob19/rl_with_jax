@@ -20,6 +20,7 @@ PPO: `ppo/`
 ---
 MAML: `maml/`
 - `maml_wave.py` = JAX on sin waves 
+Note: still working on RL implementation
 
 ---
 DDPG: `ddpg/`
