@@ -1,17 +1,35 @@
-# rl_with_jax
+# RL Implementations in JAX 
 
-$$
-\theta' = \theta + \alpha F^{-1}\nabla J \\
-F (\theta' - \theta) = \alpha \nabla J \\
+Single-file implementations focused on clarity rather than proper code standards :)
 
-\dfrac{1}{2} (\theta' - \theta)^T F (\theta' - \theta) = \alpha \dfrac{1}{2} (\theta' - \theta)^T \nabla J\\
+---
+DQN: `qlearn.py`
 
-\dfrac{1}{2} (\theta' - \theta)^T F (\theta' - \theta) = \alpha \dfrac{1}{2} (\theta + \alpha F^{-1}\nabla J - \theta)^T \nabla J\\
+---
+REINFORCE: `reinforce/`
+- `policy_grad.py` = Pytorch  
+- `reinforce_cont.py` = JAX with *continious* actions
+- `reinforce_jax.py` = JAX with *discrete* actions 
+- `reinforce_torchVSjax.py` = Time Comparison between Pytorch & JAX (torch = faster)
 
-\dfrac{1}{2} (\theta' - \theta)^T F (\theta' - \theta) = \dfrac{\alpha^2}{2} \nabla_{\theta}J(\theta)^T F^{-1} \nabla_{\theta}J(\theta)\\
+---
+PPO: `ppo/`
+- `ppo_disc.py`/`ppo_multi_disc.py` = JAX with *discrete* actions (single & multiprocessing)
+- `ppo.py`/`ppo_multi.py` = JAX with *continious* actions (single & multiprocessing)
 
+---
+MAML: `maml/`
+- `maml_wave.py` = JAX on sin waves 
 
-...\\
+Note: still working on RL implementation
 
-\alpha = \sqrt{\dfrac{2\epsilon}{\nabla_{\theta}J(\theta)^T F^{-1} \nabla_{\theta}J(\theta)}}
-$$
+---
+DDPG: `ddpg/`
+- `ddpg_jax.py` = JAX with continious actions
+- `ddpg_td3.py` = DDPG with params from TD3 paper (better than DDPG)
+
+---
+A2C: `a2c/`
+- `a2c.py`/`a2c_multi.py` = JAX with single & multiprocessing 
+
+Note: A2C doesn't work that great -- should use PPO 
