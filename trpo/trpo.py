@@ -180,12 +180,8 @@ optimizer = lambda lr: optax.chain(
     optax.scale_by_adam(),
     optax.scale(-lr),
 )
-p_optim = optimizer(policy_lr)
 v_optim = optimizer(v_lr)
-
-p_opt_state = p_optim.init(p_params)
 v_opt_state = v_optim.init(v_params)
-
 v_update_fcn = optim_update_fcn(v_optim)
 
 # %%
@@ -308,7 +304,7 @@ for e in tqdm(range(epochs)):
     writer.add_scalar('info/ploss', loss.item(), e)
 
     v_loss = 0
-    for _ in range(1):
+    for _ in range(n_v_iters):
         loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
         v_loss += loss
 
