@@ -20,6 +20,7 @@ PPO: `ppo/`
 ---
 MAML: `maml/`
 - `maml_wave.py` = JAX on sin waves 
+
 Note: still working on RL implementation
 
 ---
@@ -30,4 +31,5 @@ DDPG: `ddpg/`
 ---
 A2C: `a2c/`
 - `a2c.py`/`a2c_multi.py` = JAX with single & multiprocessing 
+
 Note: A2C doesn't work that great -- should use PPO 
