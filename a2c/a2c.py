@@ -55,6 +55,12 @@ class Categorical: # similar to pytorch categorical
     def log_prob(self, i): return np.log(self.probs[i])
     def entropy(self): return -(self.probs * np.log(self.probs)).sum()
 
+def discount_cumsum(l, discount):
+    l = onp.array(l)
+    for i in range(len(l) - 1)[::-1]:
+        l[i] = l[i] + discount * l[i+1]
+    return l 
+
 global_env_count = 0
 def rollout_v(step_i, params, env, max_n_steps=200):
     global global_env_count
@@ -83,11 +89,7 @@ def rollout_v(step_i, params, env, max_n_steps=200):
     obs, a, r, obs2, done = onp.split(v_buffer, [obs_dim, obs_dim+1, obs_dim+2, obs_dim*2+2], axis=-1)
     writer.add_scalar('rollout/total_reward', r.sum(), step_i)
 
-    # gae 
-    # if not done[-1]: r[-1] = v_s  
-    gamma = 0.99
-    for i in range(len(r) - 1)[::-1]:
-        r[i] = r[i] + gamma * r[i + 1]
+    r = discount_cumsum(r, discount=0.99)
 
     return obs, a, r, obs2, done
 
