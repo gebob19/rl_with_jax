@@ -43,14 +43,19 @@ def make_env(init_task=False):
     return env 
 
 env = make_env()
-n_actions = env.action_space.shape[0]
+
+n_actions = env.action_space.n
 obs_dim = env.observation_space.shape[0]
+print(f'[LOGGER] n_actions: {n_actions} obs_dim: {obs_dim}')
 
-a_high = env.action_space.high[0]
-a_low = env.action_space.low[0]
+# n_actions = env.action_space.shape[0]
+# obs_dim = env.observation_space.shape[0]
 
-print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
-assert -a_high == a_low
+# a_high = env.action_space.high[0]
+# a_low = env.action_space.low[0]
+
+# print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
+# assert -a_high == a_low
 
 #%%
 import haiku as hk
@@ -108,35 +113,56 @@ def eval(params, env, rng):
     while True: 
         rng, subrng = jax.random.split(rng)
         # a = eval_policy(params, obs, subrng)[0]
-        a = policy(params, obs, subrng)[0]
+        # a = onp.array(a)
 
-        a = onp.array(a)
+        a = policy(params, obs, subrng)[0].item()
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
         rewards += r
         if done: break 
     return rewards
-    
+
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
-        self.buffer_capacity = buffer_capacity = int(buffer_capacity)
+        self.buffer_capacity = int(buffer_capacity)
         self.i = 0
         # obs, obs2, a, r, done
-        self.splits = [obs_dim, obs_dim+n_actions, obs_dim+n_actions+1, obs_dim*2+1+n_actions, obs_dim*2+1+n_actions+1]
+        self.splits = [obs_dim, obs_dim+1, obs_dim+1+1, obs_dim*2+1+1, obs_dim*2+1+1+1]
         self.clear()
 
     def push(self, sample):
         assert self.i < self.buffer_capacity # dont let it get full
         (obs, a, r, obs2, done, log_prob) = sample
-        self.buffer[self.i] = onp.array([*obs, *onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
+        self.buffer[self.i] = onp.array([*obs, onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
         self.i += 1 
-
+    
     def contents(self):
         return onp.split(self.buffer[:self.i], self.splits, axis=-1)
 
     def clear(self):
         self.i = 0 
-        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
+        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + 1 + 2 + 1))
+
+# class Vector_ReplayBuffer:
+#     def __init__(self, buffer_capacity):
+#         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
+#         self.i = 0
+#         # obs, obs2, a, r, done
+#         self.splits = [obs_dim, obs_dim+n_actions, obs_dim+n_actions+1, obs_dim*2+1+n_actions, obs_dim*2+1+n_actions+1]
+#         self.clear()
+
+#     def push(self, sample):
+#         assert self.i < self.buffer_capacity # dont let it get full
+#         (obs, a, r, obs2, done, log_prob) = sample
+#         self.buffer[self.i] = onp.array([*obs, *onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
+#         self.i += 1 
+
+#     def contents(self):
+#         return onp.split(self.buffer[:self.i], self.splits, axis=-1)
+
+#     def clear(self):
+#         self.i = 0 
+#         self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
 
 def shuffle_rollout(rollout):
     rollout_len = rollout[0].shape[0]
@@ -235,7 +261,7 @@ def optim_update_fcn(optim):
     return update_step
 
 #%%
-seed = onp.random.randint(1e5) # 90897 works very well 
+seed = onp.random.randint(1e5)
 epochs = 500
 eval_every = 1
 n_step_rollout = 100 # env._max_episode_steps
@@ -260,7 +286,6 @@ p_params = policy_fcn.init(rng, obs)
 
 ## optimizers 
 optimizer = lambda lr: optax.chain(
-    optax.clip_by_global_norm(0.5),
     optax.scale_by_adam(),
     optax.scale(-lr),
 )
@@ -286,8 +311,7 @@ def rollout(p_params, env, rng):
         
         a = jax.lax.stop_gradient(a)
         log_prob = jax.lax.stop_gradient(log_prob)
-        a = onp.array(a)
-        
+        a = a.item() 
         obs2, r, done, _ = env.step(a)
 
         buffer.push((obs, a, r, obs2, done, log_prob))
@@ -365,18 +389,38 @@ elif n_tasks == 2:
 for task in tasks[:n_tasks]: 
     env.reset_task(task)
     # log max reward 
-    goal = env._task['goal']
+    x, y = env._task['goal']
+    n_right = x / 0.1
+    n_up = y / 0.1
+    action_seq = []
+    for _ in range(int(abs(n_right)+0.5)): action_seq.append(3 if n_right > 0 else 2)
+    for _ in range(int(abs(n_up)+0.5)): action_seq.append(0 if n_up > 0 else 1)
     reward = 0 
     step_count = 0 
-    obs = env.reset()
-    while True: 
-        a = goal - obs 
-        obs2, r, done, _ = env.step(a)
+    env.reset()
+    for a in action_seq: 
+        _, r, done, _ = env.step(a)
         reward += r
         step_count += 1 
         if done: break 
-        obs = obs2
+    print((x, y), action_seq, env._state)
+    assert done 
     print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+
+    # env.reset_task(task)
+    # # log max reward 
+    # goal = env._task['goal']
+    # reward = 0 
+    # step_count = 0 
+    # obs = env.reset()
+    # while True: 
+    #     a = goal - obs 
+    #     obs2, r, done, _ = env.step(a)
+    #     reward += r
+    #     step_count += 1 
+    #     if done: break 
+    #     obs = obs2
+    # print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
 
 print(f'[LOGGER]: n_tasks_per_step = {len(tasks)}')
 
