@@ -166,7 +166,6 @@ n_v_iters = 80
 gamma = 0.99 
 lmbda = 0.95
 # trpo 
-alpha_start = -1 # set to -1 if want optimal-per-weight alpha start
 delta = 0.01
 n_search_iters = 10 
 cg_iters = 10
@@ -239,6 +238,7 @@ def pullback_mvp(f, rho, w, v):
     _, f_vjp = jax.vjp(f, w)
     return f_vjp(R_gz)[0]
 
+# optimized version of above (both compute the same)
 def pullback_mvp2(f, rho, w, v):
     z, f_vjp = jax.vjp(f, w)
     _, f_jvp = jax.vjp(f_vjp, np.zeros_like(z))
@@ -262,12 +262,8 @@ tree_divide = lambda tree, denom: jax.tree_map(lambda x: x / denom, tree)
 def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
     obs = rollout[0]
     for i in np.arange(n_iters):
-        if type(alpha_start) == int: # single value 
-            alpha = alpha_start / (2 ** i)
-            new_p_params = sgd_step(p_params, p_ngrad, alpha)
-        else: # tree update 
-            alpha = tree_divide(alpha_start, 2 ** i)
-            new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
+        alpha = tree_divide(alpha_start, 2 ** i)
+        new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
 
         new_loss = batch_policy_loss(new_p_params, rollout)
 
@@ -286,16 +282,13 @@ def natural_grad(p_params, sample):
     f = lambda w: p_frwd(w, obs)
     rho = D_KL
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-            lambda v: pullback_mvp(f, rho, p_params, v),
+            lambda v: pullback_mvp2(f, rho, p_params, v),
             p_grads, maxiter=cg_iters)
     
     # compute optimal step 
-    if alpha_start == -1:
-        vec = lambda x: x.flatten()[:, None]
-        mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y)).flatten())
-        alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
-    else: 
-        alpha = None 
+    vec = lambda x: x.flatten()[:, None]
+    mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y)).flatten())
+    alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
 
     return loss, p_ngrad, alpha
 
@@ -326,7 +319,6 @@ for e in tqdm(range(epochs)):
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
     loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
-    alpha = alpha if alpha_start == -1 else alpha_start
     p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
     writer.add_scalar('info/ploss', loss.item(), e)
 
