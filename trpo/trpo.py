@@ -158,14 +158,18 @@ def optim_update_fcn(optim):
 seed = onp.random.randint(1e5)
 
 epochs = 1000
+n_step_rollout = 4000 
+# v training
 v_lr = 1e-3
-n_step_rollout = 4000 #env._max_episode_steps
-# trpo 
 n_v_iters = 80
+# gae 
 gamma = 0.99 
 lmbda = 0.95
+# trpo 
 alpha_start = 1
 delta = 0.01
+n_search_iters = 10 
+cg_iters = 10
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -270,7 +274,7 @@ def natural_grad(p_params, sample):
     rho = D_KL
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
             lambda v: pullback_mvp(f, rho, p_params, v),
-            p_grads, maxiter=10)
+            p_grads, maxiter=cg_iters)
     return loss, p_ngrad
 
 @jax.jit
@@ -300,7 +304,7 @@ for e in tqdm(range(epochs)):
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
     loss, p_ngrad = batch_natural_grad(p_params, sampled_rollout)
-    p_params = line_search(alpha_start, loss, p_params, p_ngrad, rollout, 10, delta)
+    p_params = line_search(alpha_start, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
     writer.add_scalar('info/ploss', loss.item(), e)
 
     v_loss = 0
