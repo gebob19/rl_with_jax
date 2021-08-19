@@ -166,7 +166,7 @@ n_v_iters = 80
 gamma = 0.99 
 lmbda = 0.95
 # trpo 
-alpha_start = 10 # set to -1 if want optimal-per-weight alpha start
+alpha_start = -1 # set to -1 if want optimal-per-weight alpha start
 delta = 0.01
 n_search_iters = 10 
 cg_iters = 10
@@ -292,7 +292,7 @@ def natural_grad(p_params, sample):
     # compute optimal step 
     if alpha_start == -1:
         vec = lambda x: x.flatten()[:, None]
-        mat_mul = lambda x, y: (vec(x).T @ vec(y)).flatten()
+        mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y)).flatten())
         alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
     else: 
         alpha = None 
