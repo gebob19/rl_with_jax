@@ -166,7 +166,7 @@ n_v_iters = 80
 gamma = 0.99 
 lmbda = 0.95
 # trpo 
-alpha_start = 1
+alpha_start = 10 # set to -1 if want optimal-per-weight alpha start
 delta = 0.01
 n_search_iters = 10 
 cg_iters = 10
@@ -252,19 +252,32 @@ def sgd_step(params, grads, alpha):
     sgd_update = lambda param, grad: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads)
 
+@jax.jit
+def sgd_step_tree(params, grads, alphas):
+    sgd_update = lambda param, grad, alpha: param - alpha * grad
+    return jax.tree_multimap(sgd_update, params, grads, alphas)
+
 # backtracking line-search 
+tree_divide = lambda tree, denom: jax.tree_map(lambda x: x / denom, tree)
 def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
     obs = rollout[0]
     for i in np.arange(n_iters):
-        alpha = alpha_start / (2 ** i)
-        new_p_params = sgd_step(p_params, p_ngrad, alpha)
+        if type(alpha_start) == int: # single value 
+            alpha = alpha_start / (2 ** i)
+            new_p_params = sgd_step(p_params, p_ngrad, alpha)
+        else: # tree update 
+            alpha = tree_divide(alpha_start, 2 ** i)
+            new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
+
         new_loss = batch_policy_loss(new_p_params, rollout)
 
         d_kl = jax.vmap(partial(D_KL_params, new_p_params, p_params))(obs).mean()
 
         if (new_loss < init_loss) and (d_kl <= delta): 
+            writer.add_scalar('info/line_search_n_iters', i, e)
             return new_p_params # new weights 
 
+    writer.add_scalar('info/line_search_n_iters', -1, e)
     return p_params # no new weights 
 
 def natural_grad(p_params, sample):
@@ -275,13 +288,22 @@ def natural_grad(p_params, sample):
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
             lambda v: pullback_mvp(f, rho, p_params, v),
             p_grads, maxiter=cg_iters)
-    return loss, p_ngrad
+    
+    # compute optimal step 
+    if alpha_start == -1:
+        vec = lambda x: x.flatten()[:, None]
+        mat_mul = lambda x, y: (vec(x).T @ vec(y)).flatten()
+        alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
+    else: 
+        alpha = None 
+
+    return loss, p_ngrad, alpha
 
 @jax.jit
 def batch_natural_grad(p_params, batch):
     out = jax.vmap(partial(natural_grad, p_params))(batch)
-    loss, p_ngrad = jax.tree_map(lambda x: x.mean(0), out)
-    return loss, p_ngrad
+    out = jax.tree_map(lambda x: x.mean(0), out)
+    return out
 
 def sample_rollout(rollout, p):
     rollout_len = int(rollout[0].shape[0] * p)
@@ -303,8 +325,9 @@ for e in tqdm(range(epochs)):
 
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-    loss, p_ngrad = batch_natural_grad(p_params, sampled_rollout)
-    p_params = line_search(alpha_start, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+    loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
+    alpha = alpha if alpha_start == -1 else alpha_start
+    p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
     writer.add_scalar('info/ploss', loss.item(), e)
 
     v_loss = 0
@@ -320,5 +343,6 @@ for e in tqdm(range(epochs)):
     writer.add_scalar('eval/total_reward', r, e)
 
 # %%
+
 # %%
 # %%
