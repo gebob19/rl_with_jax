@@ -36,8 +36,8 @@ def _policy_fcn(s):
     mu = hk.Sequential([
         hk.Linear(100), jax.nn.relu,
         hk.Linear(100), jax.nn.relu,
-        hk.Linear(n_actions)
-    ])(s)
+        hk.Linear(n_actions), np.tanh
+    ])(s) * a_high
     sig = np.exp(log_std)
     return mu, sig
 
@@ -61,7 +61,6 @@ v_frwd = jax.jit(critic_fcn.apply)
 @jax.jit 
 def policy(params, obs, rng):
     mu, sig = p_frwd(params, obs)
-    mu = mu_scale(mu)
     dist = distrax.MultivariateNormalDiag(mu, sig)
     a = dist.sample(seed=rng)
     a = np.clip(a, a_low, a_high)
@@ -71,7 +70,6 @@ def policy(params, obs, rng):
 @jax.jit 
 def eval_policy(params, obs, _):
     a, _ = p_frwd(params, obs)
-    a = mu_scale(a)
     a = np.clip(a, a_low, a_high)
     return a, None
 
@@ -213,7 +211,6 @@ def policy_loss(p_params, sample):
     (obs, a, old_log_prob, _, advantages) = sample 
 
     mu, sig = p_frwd(p_params, obs)
-    mu = mu_scale(mu)
     dist = distrax.MultivariateNormalDiag(mu, sig)
     ratio = np.exp(dist.log_prob(a) - old_log_prob)
     loss = -(ratio * advantages).sum()
@@ -246,7 +243,6 @@ def hvp(J, w, v):
 def D_KL_Gauss(θ1, θ2):
     𝜇1, 𝜎1 = θ1
     𝜇2, 𝜎2 = θ2
-    𝜇1, 𝜇2 = mu_scale(𝜇1), mu_scale(𝜇2) 
     d_kl = np.log(𝜎2 / 𝜎1) + (𝜎1**2 + (𝜇1 - 𝜇2)**2) / 2*𝜎2**2 - .5
     d_kl = d_kl.sum() # sum over n_actions 
     return d_kl
@@ -286,11 +282,12 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
 
         d_kl = jax.vmap(partial(D_KL_params, new_p_params, p_params))(obs).mean()
 
+        print(init_loss, new_loss, d_kl, delta)
         if (new_loss < init_loss) and (d_kl <= delta): 
-            writer.add_scalar('info/line_search_n_iters', i, p_step)
+            # writer.add_scalar('info/line_search_n_iters', i, p_step)
             return new_p_params # new weights 
 
-    writer.add_scalar('info/line_search_n_iters', -1, p_step)
+    # writer.add_scalar('info/line_search_n_iters', -1, p_step)
     return p_params # no new weights 
 
 def natural_grad(p_params, sample):
@@ -321,6 +318,24 @@ def sample_rollout(rollout, p):
     idxs = onp.random.choice(rollout_len, size=rollout_len, replace=False)
     sampled_rollout = jax.tree_map(lambda x: x[idxs], rollout)
     return sampled_rollout
+
+#%%
+rng, subkey = jax.random.split(rng, 2) 
+rollout = worker.rollout(p_params, v_params, subkey)
+sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
+loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
+
+#%%
+p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+
+#%%
+obs = rollout[0]
+new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
+new_loss = batch_policy_loss(new_p_params, rollout)
+
+#%%
+d_kl = jax.vmap(partial(D_KL_params, p_params, p_params))(obs)
+d_kl
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
