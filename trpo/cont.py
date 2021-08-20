@@ -36,8 +36,10 @@ def _policy_fcn(s):
     mu = hk.Sequential([
         hk.Linear(100), jax.nn.relu,
         hk.Linear(100), jax.nn.relu,
-        hk.Linear(n_actions), np.tanh
-    ])(s) * a_high
+        hk.Linear(n_actions)
+    ])(s)
+    mu = mu_scale(mu)
+    # log_std = np.clip(log_std, -2, 2) # don't let it explode
     sig = np.exp(log_std)
     return mu, sig
 
@@ -208,12 +210,12 @@ v_update_fcn = optim_update_fcn(v_optim)
 
 # %%
 def policy_loss(p_params, sample):
-    (obs, a, old_log_prob, _, advantages) = sample 
+    (obs, a, _, _, advantages) = sample 
 
     mu, sig = p_frwd(p_params, obs)
     dist = distrax.MultivariateNormalDiag(mu, sig)
-    ratio = np.exp(dist.log_prob(a) - old_log_prob)
-    loss = -(ratio * advantages).sum()
+    # ratio = np.exp(dist.log_prob(a) - old_log_prob)
+    loss = -(np.exp(dist.log_prob(a)) * advantages).sum()
     return loss
 
 @jax.jit
@@ -243,16 +245,13 @@ def hvp(J, w, v):
 def D_KL_Gauss(θ1, θ2):
     𝜇1, 𝜎1 = θ1
     𝜇2, 𝜎2 = θ2
-    d_kl = np.log(𝜎2 / 𝜎1) + (𝜎1**2 + (𝜇1 - 𝜇2)**2) / 2*𝜎2**2 - .5
-    d_kl = d_kl.sum() # sum over n_actions 
-    return d_kl
+    d_kl = np.log(𝜎2 / 𝜎1) + (𝜎1**2 + (𝜇1 - 𝜇2)**2) / (2*𝜎2**2) - .5
+    return d_kl.sum() # sum over
 
 def D_KL_params(p1, p2, obs):
     θ1, θ2 = p_frwd(p1, obs), p_frwd(p2, obs)
     return D_KL_Gauss(θ1, θ2)
 
-# jvp = forward-autodiff
-# vjp = reverse-autodiff
 def pullback_mvp(f, rho, w, v):
     z, R_z = jax.jvp(f, (w,), (v,))
     # rho diff 
@@ -304,7 +303,7 @@ def natural_grad(p_params, sample):
     mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y) + 1e-8).flatten())
     alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
 
-    return loss, p_ngrad, alpha
+    return loss, p_ngrad, alpha, p_grads
 
 @jax.jit
 def batch_natural_grad(p_params, batch):
@@ -319,6 +318,19 @@ def sample_rollout(rollout, p):
     sampled_rollout = jax.tree_map(lambda x: x[idxs], rollout)
     return sampled_rollout
 
+# #%%
+# # rollout
+# rng, subkey = jax.random.split(rng, 2) 
+# rollout = worker.rollout(p_params, v_params, subkey)
+
+# #%%
+# sample = [r[0] for r in rollout]
+# policy_loss(p_params, sample)
+
+# #%%
+# jax.vmap(partial(policy_loss, p_params))(rollout)[0]
+
+#%%
 #%%
 rng, subkey = jax.random.split(rng, 2) 
 rollout = worker.rollout(p_params, v_params, subkey)
@@ -354,16 +366,39 @@ while p_step < max_n_steps:
 
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-    loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
+    loss, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
     p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
     writer.add_scalar('info/ploss', loss.item(), p_step)
     p_step += 1
     pbar.update(1)
 
+    # v_func
     for _ in range(n_v_iters):
         loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
         writer.add_scalar('info/vloss', loss.item(), v_step)
         v_step += 1
+
+    # print('===============')
+    # print('-----PARAMS')
+    # for i, g in enumerate(jax.tree_leaves(p_params)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     print(onp.array(g))
+    #     writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
+    # print('-----GRAD')
+    # for i, g in enumerate(jax.tree_leaves(p_grads)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     print(onp.array(g))
+    #     writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
+    # print('-----NGRAD----')
+    # for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     print(onp.array(g))
+    #     writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
+    # print('-----ALPHA')
+    # for i, g in enumerate(jax.tree_leaves(alpha)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     print(onp.array(g))
+    #     writer.add_histogram(f'{name}_{i}_alpha', onp.array(g), p_step)
 
     rng, subkey = jax.random.split(rng, 2)
     r = eval(p_params, env, subkey)

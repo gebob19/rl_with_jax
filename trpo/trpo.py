@@ -319,12 +319,10 @@ for e in tqdm(range(epochs)):
     rollout = worker.rollout(p_params, v_params, subkey)
 
     # train
-    for _ in range(10):
-        sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-        loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
-        sampled_rollout = sample_rollout(rollout, batch_size) # sample batch
-        p_params = line_search(alpha, loss, p_params, p_ngrad, sampled_rollout, n_search_iters, delta)
-        writer.add_scalar('info/ploss', loss.item(), e)
+    sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
+    loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
+    p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+    writer.add_scalar('info/ploss', loss.item(), e)
 
     v_loss = 0
     for _ in range(n_v_iters):
@@ -333,6 +331,11 @@ for e in tqdm(range(epochs)):
 
     v_loss /= n_v_iters
     writer.add_scalar('info/vloss', v_loss.item(), e)
+
+    for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
+        name = 'b' if len(g.shape) == 1 else 'w'
+        writer.add_histogram(f'{name}_{i}_grad', onp.array(g), e)
+
 
     rng, subkey = jax.random.split(rng, 2)
     r = eval(p_params, env, subkey)
