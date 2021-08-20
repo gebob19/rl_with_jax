@@ -184,14 +184,13 @@ while step_count < max_n_steps:
         rng, subkey = jax.random.split(rng, 2) 
         obs, a, r = rollout(p_params, subkey)
         writer.add_scalar('rollout/reward', r.sum().item(), epi_i)
-        r = reward2go(r)
 
         obs_l.append(obs)
         act_l.append(a)
         rew_l.append(r)
         epi_i += 1
 
-    W = v_fit(obs_l, rew_l)[0]
+    W = v_fit(obs_l, [reward2go(r) for r in rew_l])[0]
 
     gradients = []
     for i in range(batch_size):

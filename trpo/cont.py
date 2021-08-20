@@ -13,24 +13,33 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
-env_name = 'CartPole-v0'
+env_name = 'Pendulum-v0'
 env = gym.make(env_name)
 
-n_actions = env.action_space.n
+n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
 
-print(f'[LOGGER] n_actions: {n_actions} obs_dim: {obs_dim}')
+a_high = env.action_space.high[0]
+a_low = env.action_space.low[0]
+
+print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
+assert -a_high == a_low
 
 #%%
 init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
+def mu_scale(mu):
+    return np.tanh(mu) * a_high
+
 def _policy_fcn(s):
-    pi = hk.Sequential([
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(n_actions, w_init=init_final)
+    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones, dtype=np.float64)
+    mu = hk.Sequential([
+        hk.Linear(100), jax.nn.relu,
+        hk.Linear(100), jax.nn.relu,
+        hk.Linear(n_actions)
     ])(s)
-    return pi
+    sig = np.exp(log_std)
+    return mu, sig
 
 def _critic_fcn(s):
     v = hk.Sequential([
@@ -51,39 +60,49 @@ v_frwd = jax.jit(critic_fcn.apply)
 #%%
 @jax.jit 
 def policy(params, obs, rng):
-    pi = p_frwd(params, obs)
-    dist = distrax.Categorical(logits=pi)
+    mu, sig = p_frwd(params, obs)
+    mu = mu_scale(mu)
+    dist = distrax.MultivariateNormalDiag(mu, sig)
     a = dist.sample(seed=rng)
+    a = np.clip(a, a_low, a_high)
     log_prob = dist.log_prob(a)
     return a, log_prob
+
+@jax.jit 
+def eval_policy(params, obs, _):
+    a, _ = p_frwd(params, obs)
+    a = mu_scale(a)
+    a = np.clip(a, a_low, a_high)
+    return a, None
 
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
         self.buffer_capacity = buffer_capacity = int(buffer_capacity)
         self.i = 0
         # obs, obs2, a, r, done
-        self.splits = [obs_dim, obs_dim+1, obs_dim+1+1, obs_dim*2+1+1, obs_dim*2+1+1+1]
+        self.splits = [obs_dim, obs_dim+n_actions, obs_dim+n_actions+1, obs_dim*2+1+n_actions, obs_dim*2+1+n_actions+1]
         self.clear()
 
     def push(self, sample):
         assert self.i < self.buffer_capacity # dont let it get full
         (obs, a, r, obs2, done, log_prob) = sample
-        self.buffer[self.i] = onp.array([*obs, onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
+        self.buffer[self.i] = onp.array([*obs, *onp.array(a), onp.array(r), *obs2, float(done), onp.array(log_prob)])
         self.i += 1 
-    
+
     def contents(self):
         return onp.split(self.buffer[:self.i], self.splits, axis=-1)
 
     def clear(self):
         self.i = 0 
-        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + 1 + 2 + 1))
+        self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
 
 def eval(params, env, rng):
     rewards = 0 
     obs = env.reset()
     while True: 
         rng, subrng = jax.random.split(rng)
-        a = policy(params, obs, subrng)[0].item()
+        a = policy(params, obs, subrng)[0]
+        a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
         rewards += r
@@ -129,7 +148,7 @@ class Worker:
         for _ in range(self.n_steps): # rollout 
             rng, subrng = jax.random.split(rng)
             a, log_prob = policy(p_params, self.obs, subrng)
-            a = a.item()
+            a = onp.array(a)
 
             obs2, r, done, _ = self.env.step(a)
 
@@ -157,8 +176,10 @@ def optim_update_fcn(optim):
 #%%
 seed = onp.random.randint(1e5)
 
-epochs = 1000
+max_n_steps = 1e6
 n_step_rollout = 4000 
+batch_size = 128 
+n_p_iters = 10 
 # v training
 v_lr = 1e-3
 n_v_iters = 80
@@ -169,7 +190,6 @@ lmbda = 0.95
 delta = 0.01
 n_search_iters = 10 
 cg_iters = 10
-batch_size = 128
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
@@ -192,8 +212,9 @@ v_update_fcn = optim_update_fcn(v_optim)
 def policy_loss(p_params, sample):
     (obs, a, old_log_prob, _, advantages) = sample 
 
-    pi = p_frwd(p_params, obs)
-    dist = distrax.Categorical(logits=pi)
+    mu, sig = p_frwd(p_params, obs)
+    mu = mu_scale(mu)
+    dist = distrax.MultivariateNormalDiag(mu, sig)
     ratio = np.exp(dist.log_prob(a) - old_log_prob)
     loss = -(ratio * advantages).sum()
     return loss
@@ -221,14 +242,18 @@ def critic_step(v_params, opt_state, batch):
 def hvp(J, w, v):
     return jax.jvp(jax.grad(J), (w,), (v,))[1]
 
-def D_KL(z1, z2):
-    p1, p2 = jax.nn.softmax(z1), jax.nn.softmax(z2)
-    d_kl = (p1 * (np.log(p1) - np.log(p2))).sum()
+# https://stats.stackexchange.com/questions/7440/kl-divergence-between-two-univariate-gaussians
+def D_KL_Gauss(θ1, θ2):
+    𝜇1, 𝜎1 = θ1
+    𝜇2, 𝜎2 = θ2
+    𝜇1, 𝜇2 = mu_scale(𝜇1), mu_scale(𝜇2) 
+    d_kl = np.log(𝜎2 / 𝜎1) + (𝜎1**2 + (𝜇1 - 𝜇2)**2) / 2*𝜎2**2 - .5
+    d_kl = d_kl.sum() # sum over n_actions 
     return d_kl
 
 def D_KL_params(p1, p2, obs):
-    z1, z2 = p_frwd(p1, obs), p_frwd(p2, obs)
-    return D_KL(z1, z2)
+    θ1, θ2 = p_frwd(p1, obs), p_frwd(p2, obs)
+    return D_KL_Gauss(θ1, θ2)
 
 # jvp = forward-autodiff
 # vjp = reverse-autodiff
@@ -237,15 +262,6 @@ def pullback_mvp(f, rho, w, v):
     # rho diff 
     R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     _, f_vjp = jax.vjp(f, w)
-    return f_vjp(R_gz)[0]
-
-# optimized version of above (both compute the same)
-def pullback_mvp2(f, rho, w, v):
-    z, f_vjp = jax.vjp(f, w)
-    _, f_jvp = jax.vjp(f_vjp, np.zeros_like(z))
-    R_z = f_jvp((v,))[0]
-    # rho diff 
-    R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     return f_vjp(R_gz)[0]
 
 @jax.jit
@@ -271,24 +287,24 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
         d_kl = jax.vmap(partial(D_KL_params, new_p_params, p_params))(obs).mean()
 
         if (new_loss < init_loss) and (d_kl <= delta): 
-            writer.add_scalar('info/line_search_n_iters', i, e)
+            writer.add_scalar('info/line_search_n_iters', i, p_step)
             return new_p_params # new weights 
 
-    writer.add_scalar('info/line_search_n_iters', -1, e)
+    writer.add_scalar('info/line_search_n_iters', -1, p_step)
     return p_params # no new weights 
 
 def natural_grad(p_params, sample):
     obs = sample[0]
     loss, p_grads = jax.value_and_grad(policy_loss)(p_params, sample)
     f = lambda w: p_frwd(w, obs)
-    rho = D_KL
+    rho = D_KL_Gauss
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-            lambda v: pullback_mvp2(f, rho, p_params, v),
+            lambda v: pullback_mvp(f, rho, p_params, v),
             p_grads, maxiter=cg_iters)
     
     # compute optimal step 
     vec = lambda x: x.flatten()[:, None]
-    mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y)).flatten())
+    mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y) + 1e-8).flatten())
     alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
 
     return loss, p_ngrad, alpha
@@ -313,30 +329,30 @@ writer = SummaryWriter(comment=f'trpo_{env_name}_seed={seed}_nrollout={n_step_ro
 #%%
 from tqdm import tqdm 
 
-for e in tqdm(range(epochs)):
+p_step = 0 
+v_step = 0 
+pbar = tqdm(total=max_n_steps)
+while p_step < max_n_steps: 
     # rollout
     rng, subkey = jax.random.split(rng, 2) 
     rollout = worker.rollout(p_params, v_params, subkey)
 
     # train
-    for _ in range(10):
-        sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-        loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
-        sampled_rollout = sample_rollout(rollout, batch_size) # sample batch
-        p_params = line_search(alpha, loss, p_params, p_ngrad, sampled_rollout, n_search_iters, delta)
-        writer.add_scalar('info/ploss', loss.item(), e)
+    sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
+    loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
+    p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+    writer.add_scalar('info/ploss', loss.item(), p_step)
+    p_step += 1
+    pbar.update(1)
 
-    v_loss = 0
     for _ in range(n_v_iters):
         loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
-        v_loss += loss
-
-    v_loss /= n_v_iters
-    writer.add_scalar('info/vloss', v_loss.item(), e)
+        writer.add_scalar('info/vloss', loss.item(), v_step)
+        v_step += 1
 
     rng, subkey = jax.random.split(rng, 2)
     r = eval(p_params, env, subkey)
-    writer.add_scalar('eval/total_reward', r, e)
+    writer.add_scalar('eval/total_reward', r, p_step)
 
 # %%
 
