@@ -1,4 +1,4 @@
-# doesn't work :(
+# works :) 
 
 #%%
 import jax 
@@ -15,9 +15,9 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
-# env_name = 'Pendulum-v0'
+# env_name = 'Pendulum-v0' ## this env doesn't converge with TRPO (tried other impls too)
 import pybullet_envs
-env_name = 'CartPoleContinuousBulletEnv-v0'
+env_name = 'HalfCheetahBulletEnv-v0' ## this works :)
 env = gym.make(env_name)
 
 n_actions = env.action_space.shape[0]
@@ -94,7 +94,7 @@ class Vector_ReplayBuffer:
         self.i += 1 
 
     def contents(self):
-        return onp.split(self.buffer[:self.i], self.splits, axis=-1)
+        return onp.split(self.buffer[:self.i].astype(np.float64), self.splits, axis=-1)
 
     def clear(self):
         self.i = 0 
@@ -191,7 +191,7 @@ def optim_update_fcn(optim):
 seed = onp.random.randint(1e5)
 
 max_n_steps = 1e6
-n_step_rollout = 2048
+n_step_rollout = 25000
 n_p_iters = 10 
 # v training
 v_lr = 1e-3
@@ -211,6 +211,9 @@ onp.random.seed(seed)
 obs = env.reset() # dummy input 
 p_params = policy_fcn.init(rng, obs) 
 v_params = critic_fcn.init(rng, obs) 
+
+make_f64 = lambda params: jax.tree_map(lambda x: x.astype(np.float64), params)
+p_params = make_f64(p_params)
 
 worker = Worker(n_step_rollout)
 
@@ -387,18 +390,18 @@ while p_step < max_n_steps:
         writer.add_scalar('info/vloss', loss.item(), v_step)
         v_step += 1
 
-    # metrics 
-    for i, g in enumerate(jax.tree_leaves(p_params)): 
-        name = 'b' if len(g.shape) == 1 else 'w'
-        writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
+    # # metrics 
+    # for i, g in enumerate(jax.tree_leaves(p_params)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
     
-    for i, g in enumerate(jax.tree_leaves(p_grads)): 
-        name = 'b' if len(g.shape) == 1 else 'w'
-        writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
+    # for i, g in enumerate(jax.tree_leaves(p_grads)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
     
-    for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
-        name = 'b' if len(g.shape) == 1 else 'w'
-        writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
+    # for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
     
     for i, g in enumerate(jax.tree_leaves(alpha)): 
         writer.add_scalar(f'alpha/{i}', g.item(), p_step)
