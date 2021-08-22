@@ -1,3 +1,5 @@
+# works :) 
+
 #%%
 import jax 
 import jax.numpy as np 
@@ -28,7 +30,7 @@ def _policy_fcn(s):
     pi = hk.Sequential([
         hk.Linear(64), jax.nn.relu,
         hk.Linear(64), jax.nn.relu,
-        hk.Linear(n_actions, w_init=init_final)
+        hk.Linear(n_actions, w_init=init_final), jax.nn.softmax
     ])(s)
     return pi
 
@@ -36,7 +38,7 @@ def _critic_fcn(s):
     v = hk.Sequential([
         hk.Linear(64), jax.nn.relu,
         hk.Linear(64), jax.nn.relu,
-        hk.Linear(1, w_init=init_final), 
+        hk.Linear(1), 
     ])(s)
     return v 
 
@@ -52,7 +54,7 @@ v_frwd = jax.jit(critic_fcn.apply)
 @jax.jit 
 def policy(params, obs, rng):
     pi = p_frwd(params, obs)
-    dist = distrax.Categorical(logits=pi)
+    dist = distrax.Categorical(probs=pi)
     a = dist.sample(seed=rng)
     log_prob = dist.log_prob(a)
     return a, log_prob
@@ -155,7 +157,7 @@ def optim_update_fcn(optim):
     return update_step
 
 #%%
-seed = onp.random.randint(1e5)
+seed = 24910 #onp.random.randint(1e5)
 
 epochs = 1000
 n_step_rollout = 4000 
@@ -167,12 +169,13 @@ gamma = 0.99
 lmbda = 0.95
 # trpo 
 delta = 0.01
+damp_lambda = 1e-5
 n_search_iters = 10 
 cg_iters = 10
-batch_size = 128
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
+env.seed(seed)
 
 obs = env.reset() # dummy input 
 p_params = policy_fcn.init(rng, obs) 
@@ -193,7 +196,7 @@ def policy_loss(p_params, sample):
     (obs, a, old_log_prob, _, advantages) = sample 
 
     pi = p_frwd(p_params, obs)
-    dist = distrax.Categorical(logits=pi)
+    dist = distrax.Categorical(probs=pi)
     ratio = np.exp(dist.log_prob(a) - old_log_prob)
     loss = -(ratio * advantages).sum()
     return loss
@@ -222,7 +225,8 @@ def hvp(J, w, v):
     return jax.jvp(jax.grad(J), (w,), (v,))[1]
 
 def D_KL(z1, z2):
-    p1, p2 = jax.nn.softmax(z1), jax.nn.softmax(z2)
+    # p1, p2 = jax.nn.softmax(z1), jax.nn.softmax(z2)
+    p1, p2 = z1, z2
     d_kl = (p1 * (np.log(p1) - np.log(p2))).sum()
     return d_kl
 
@@ -230,22 +234,11 @@ def D_KL_params(p1, p2, obs):
     z1, z2 = p_frwd(p1, obs), p_frwd(p2, obs)
     return D_KL(z1, z2)
 
-# jvp = forward-autodiff
-# vjp = reverse-autodiff
 def pullback_mvp(f, rho, w, v):
     z, R_z = jax.jvp(f, (w,), (v,))
     # rho diff 
     R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     _, f_vjp = jax.vjp(f, w)
-    return f_vjp(R_gz)[0]
-
-# optimized version of above (both compute the same)
-def pullback_mvp2(f, rho, w, v):
-    z, f_vjp = jax.vjp(f, w)
-    _, f_jvp = jax.vjp(f_vjp, np.zeros_like(z))
-    R_z = f_jvp((v,))[0]
-    # rho diff 
-    R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     return f_vjp(R_gz)[0]
 
 @jax.jit
@@ -258,14 +251,18 @@ def sgd_step_tree(params, grads, alphas):
     sgd_update = lambda param, grad, alpha: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads, alphas)
 
+import operator
+tree_scalar_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree)
+tree_scalar_divide = tree_scalar_op(operator.truediv)
+tree_scalar_mult = tree_scalar_op(operator.mul)
+
 # backtracking line-search 
-tree_divide = lambda tree, denom: jax.tree_map(lambda x: x / denom, tree)
 def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
     obs = rollout[0]
     for i in np.arange(n_iters):
-        alpha = tree_divide(alpha_start, 2 ** i)
-        new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
+        alpha = tree_scalar_divide(alpha_start, 2 ** i)
 
+        new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
         new_loss = batch_policy_loss(new_p_params, rollout)
 
         d_kl = jax.vmap(partial(D_KL_params, new_p_params, p_params))(obs).mean()
@@ -277,13 +274,18 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
     writer.add_scalar('info/line_search_n_iters', -1, e)
     return p_params # no new weights 
 
+def tree_mvp_dampen(mvp, lmbda=0.1):
+    dampen_fcn = lambda mvp_, v_: mvp_ + lmbda * v_
+    damp_mvp = lambda v: jax.tree_multimap(dampen_fcn, mvp(v), v)
+    return damp_mvp
+
 def natural_grad(p_params, sample):
     obs = sample[0]
     loss, p_grads = jax.value_and_grad(policy_loss)(p_params, sample)
     f = lambda w: p_frwd(w, obs)
     rho = D_KL
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-            lambda v: pullback_mvp2(f, rho, p_params, v),
+            tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
             p_grads, maxiter=cg_iters)
     
     # compute optimal step 
@@ -321,6 +323,10 @@ for e in tqdm(range(epochs)):
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
     loss, p_ngrad, alpha = batch_natural_grad(p_params, sampled_rollout)
+    for i, g in enumerate(jax.tree_leaves(alpha)): 
+        writer.add_scalar(f'alpha/{i}', g.item(), e)
+    
+    # update 
     p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
     writer.add_scalar('info/ploss', loss.item(), e)
 
@@ -335,7 +341,6 @@ for e in tqdm(range(epochs)):
     for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
         name = 'b' if len(g.shape) == 1 else 'w'
         writer.add_histogram(f'{name}_{i}_grad', onp.array(g), e)
-
 
     rng, subkey = jax.random.split(rng, 2)
     r = eval(p_params, env, subkey)

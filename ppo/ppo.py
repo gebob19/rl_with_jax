@@ -13,32 +13,32 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
-# env_name = 'Pendulum-v0'
-# make_env = lambda: gym.make(env_name)
+env_name = 'Pendulum-v0'
+make_env = lambda: gym.make(env_name)
 
-from env import Navigation2DEnv
-env_name = 'Navigation2D'
-def make_env():
-    env = Navigation2DEnv(max_n_steps=200)
-    env.seed(0)
-    task = env.sample_tasks(1)[0]
-    print(f'[LOGGER]: task = {task}')
-    env.reset_task(task)
+# from env import Navigation2DEnv
+# env_name = 'Navigation2D'
+# def make_env():
+#     env = Navigation2DEnv(max_n_steps=200)
+#     env.seed(0)
+#     task = env.sample_tasks(1)[0]
+#     print(f'[LOGGER]: task = {task}')
+#     env.reset_task(task)
 
-    # log max reward 
-    goal = env._task['goal']
-    reward = 0 
-    step_count = 0 
-    obs = env.reset()
-    while True: 
-        a = goal - obs 
-        obs2, r, done, _ = env.step(a)
-        reward += r
-        step_count += 1 
-        if done: break 
-        obs = obs2
-    print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
-    return env 
+#     # log max reward 
+#     goal = env._task['goal']
+#     reward = 0 
+#     step_count = 0 
+#     obs = env.reset()
+#     while True: 
+#         a = goal - obs 
+#         obs2, r, done, _ = env.step(a)
+#         reward += r
+#         step_count += 1 
+#         if done: break 
+#         obs = obs2
+#     print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+#     return env 
 
 env = make_env()
 n_actions = env.action_space.shape[0]
@@ -101,9 +101,8 @@ def eval(params, env, rng):
     obs = env.reset()
     while True: 
         rng, subrng = jax.random.split(rng)
-        a = eval_policy(params, obs, subrng)[0]
-        # a = policy(params, obs, subrng)[0]
-
+        # a = eval_policy(params, obs, subrng)[0]
+        a = policy(params, obs, subrng)[0]
         a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
         obs = obs2 
@@ -260,7 +259,7 @@ class Worker:
         return rollout
 
 #%%
-seed = onp.random.randint(1e5) # 90897 works very well 
+seed = 90897 #onp.random.randint(1e5) # 90897 works very well 
 gamma = 0.99 
 lmbda = 0.95
 eps = 0.2
