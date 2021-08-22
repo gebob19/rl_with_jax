@@ -224,19 +224,16 @@ def critic_step(v_params, opt_state, batch):
 def hvp(J, w, v):
     return jax.jvp(jax.grad(J), (w,), (v,))[1]
 
-def D_KL(z1, z2):
-    # p1, p2 = jax.nn.softmax(z1), jax.nn.softmax(z2)
-    p1, p2 = z1, z2
+def D_KL(p1, p2):
     d_kl = (p1 * (np.log(p1) - np.log(p2))).sum()
     return d_kl
 
-def D_KL_params(p1, p2, obs):
-    z1, z2 = p_frwd(p1, obs), p_frwd(p2, obs)
-    return D_KL(z1, z2)
+def D_KL_params(param1, param2, obs):
+    p1, p2 = p_frwd(param1, obs), p_frwd(param2, obs)
+    return D_KL(p1, p2)
 
 def pullback_mvp(f, rho, w, v):
     z, R_z = jax.jvp(f, (w,), (v,))
-    # rho diff 
     R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     _, f_vjp = jax.vjp(f, w)
     return f_vjp(R_gz)[0]
@@ -289,6 +286,11 @@ def natural_grad(p_params, sample):
             p_grads, maxiter=cg_iters)
     
     # compute optimal step 
+    # SGD = theta - alpha * ∇J where ∇J = Jacobian of Loss
+    # ∇J = N x M, F = N x N where N = #params and M = #outputs (in DL M = 1! so ∇J = N x 1)
+    # Note: s^T H s (from paper) = ∇J^T (H^-1 ∇J <-- we know this already p_ngrad)
+    # H^-1 ∇J = N x 1 ... then ∇J^T H^-1 ∇J = 1x1
+    # thus turn both to vecs and dot prod to compute alpha 
     vec = lambda x: x.flatten()[:, None]
     mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y)).flatten())
     alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
