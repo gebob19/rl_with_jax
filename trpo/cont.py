@@ -188,7 +188,7 @@ def optim_update_fcn(optim):
     return update_step
 
 #%%
-seed = onp.random.randint(1e5)
+seed = 85014 # onp.random.randint(1e5)
 
 max_n_steps = 1e6
 n_step_rollout = 25000
@@ -207,6 +207,7 @@ cg_iters = 10
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
+env.seed(seed)
 
 obs = env.reset() # dummy input 
 p_params = policy_fcn.init(rng, obs) 
@@ -296,17 +297,16 @@ def sgd_step_tree(params, grads, alphas):
     sgd_update = lambda param, grad, alpha: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads, alphas)
 
-# backtracking line-search 
-
 tree_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree)
 import operator
 tree_divide = tree_op(operator.truediv)
 tree_mult = tree_op(operator.mul)
 
+# backtracking line-search 
 def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
     obs = rollout[0]
     for i in np.arange(n_iters):
-        alpha = tree_divide(alpha_start, 2 ** i)
+        alpha = tree_mult(alpha_start, 0.9 ** i)
 
         new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
         new_loss, _ = batch_policy_loss(new_p_params, rollout)
@@ -331,7 +331,6 @@ def tree_mvp_dampen(mvp, lmbda=0.1):
     damp_mvp = lambda v: jax.tree_multimap(dampen_fcn, mvp(v), v)
     return damp_mvp
 
-@jax.jit
 def natural_grad(p_params, sample):
     obs = sample[0]
     (loss, info), p_grads = policy_loss_grad(p_params, sample)
@@ -343,7 +342,9 @@ def natural_grad(p_params, sample):
     
     # compute optimal step 
     vec = lambda x: x.flatten()[:, None]
-    mat_mul = lambda x, Hx: np.sqrt(2 * delta / (vec(x).T @ vec(Hx) + 1e-8).flatten())
+    # sometimes matMul is negative which when + np.sqrt results in NaN
+    safe_mat_mul_denom = lambda x, Hx: np.maximum(vec(x).T @ vec(Hx), 1e-8).flatten()
+    mat_mul = lambda x, Hx: np.sqrt(2 * delta / safe_mat_mul_denom(x, Hx))
     alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
 
     return loss, info, p_ngrad, alpha, p_grads
@@ -362,55 +363,100 @@ def sample_rollout(rollout, p):
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'trpo_{env_name}_seed={seed}_nrollout={n_step_rollout}')
+writer = SummaryWriter(comment=f'trpo_{env_name}_seed={seed}_nrollout={n_step_rollout}_2')
 p_step = 0 
 v_step = 0 
 
-from tqdm import tqdm 
-pbar = tqdm(total=max_n_steps)
-while p_step < max_n_steps: 
-    # rollout
-    rng, subkey = jax.random.split(rng, 2) 
-    rollout = worker.rollout(p_params, v_params, subkey)
+#%%
+try: 
+    # from tqdm import tqdm 
+    from tqdm.notebook import tqdm 
+    pbar = tqdm(total=max_n_steps)
+    while p_step < max_n_steps: 
+        # rollout
+        rng, subkey = jax.random.split(rng, 2) 
+        rollout = worker.rollout(p_params, v_params, subkey)
 
-    # train
-    sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-    loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
-    p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
-    writer.add_scalar('info/ploss', loss.item(), p_step)
-    for k in info.keys(): 
-        writer.add_scalar(f'info/{k}', info[k].item(), p_step)
+        # train
+        sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
+        loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
+        p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+        writer.add_scalar('info/ploss', loss.item(), p_step)
+        for k in info.keys(): 
+            writer.add_scalar(f'info/{k}', info[k].item(), p_step)
 
-    p_step += 1
-    pbar.update(1)
+        p_step += 1
+        pbar.update(1)
 
-    # v_func
-    for _ in range(n_v_iters):
-        loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
-        writer.add_scalar('info/vloss', loss.item(), v_step)
-        v_step += 1
-
-    # # metrics 
-    # for i, g in enumerate(jax.tree_leaves(p_params)): 
-    #     name = 'b' if len(g.shape) == 1 else 'w'
-    #     writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
+        # v_func
+        for _ in range(n_v_iters):
+            loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
+            writer.add_scalar('info/vloss', loss.item(), v_step)
+            v_step += 1
     
-    # for i, g in enumerate(jax.tree_leaves(p_grads)): 
-    #     name = 'b' if len(g.shape) == 1 else 'w'
-    #     writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
-    
-    # for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
-    #     name = 'b' if len(g.shape) == 1 else 'w'
-    #     writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
-    
-    for i, g in enumerate(jax.tree_leaves(alpha)): 
-        writer.add_scalar(f'alpha/{i}', g.item(), p_step)
+        # metrics 
+        for i, g in enumerate(jax.tree_leaves(p_params)): 
+            name = 'b' if len(g.shape) == 1 else 'w'
+            writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
+        
+        for i, g in enumerate(jax.tree_leaves(p_grads)): 
+            name = 'b' if len(g.shape) == 1 else 'w'
+            writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
+        
+        for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
+            name = 'b' if len(g.shape) == 1 else 'w'
+            writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
+        
+        for i, g in enumerate(jax.tree_leaves(alpha)): 
+            writer.add_scalar(f'alpha/{i}', g.item(), p_step)
 
-    rng, subkey = jax.random.split(rng, 2)
-    r = eval(p_params, env, subkey)
-    writer.add_scalar('eval/total_reward', r, p_step)
+        rng, subkey = jax.random.split(rng, 2)
+        r = eval(p_params, env, subkey)
+        writer.add_scalar('eval/total_reward', r, p_step)
 
-# %%
+except: 
+    print('err!')
 
-# %%
+# # %%
+# jit_natural_grad = jax.jit(natural_grad)
+# for i in range(sampled_rollout[0].shape[0]):
+#     print(i)
+#     sample = [r[i] for r in sampled_rollout]
+#     loss, info, p_ngrad, alpha, p_grads = jit_natural_grad(p_params, sample)
+#     print(loss)
+
+# # %%
+# i = 1995
+# sample = [r[i] for r in sampled_rollout]
+# loss, info, p_ngrad, alpha, p_grads = natural_grad(p_params, sample)
+
+# # %%
+# obs = sample[0]
+# (loss, info), p_grads = policy_loss_grad(p_params, sample)
+# f = lambda w: p_frwd(w, obs)
+# rho = D_KL_Gauss
+# p_ngrad, _ = jax.scipy.sparse.linalg.cg(
+#         tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
+#         p_grads, maxiter=cg_iters)
+
+# # %%
+# pullback_mvp(f, rho, p_params, v)
+
+# # %%
+# # compute optimal step 
+# vec = lambda x: x.flatten()[:, None]
+# mat_mul = lambda x, Hx: (vec(x).T @ vec(Hx)).flatten()
+# alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
+# alpha
+
+# #%%
+# bg = p_grads['linear']['b']
+# bng = p_ngrad['linear']['b']
+# np.maximum(vec(bg).T @ vec(bng), 1e-8).flatten()
+
+# #%%
+# D_KL_params(p_params, p_params, obs)
+
+# # %%
+
 # %%

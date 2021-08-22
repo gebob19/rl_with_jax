@@ -287,8 +287,8 @@ def natural_grad(p_params, sample):
     
     # compute optimal step 
     # SGD = theta - alpha * ∇J where ∇J = Jacobian of Loss
-    # ∇J = N x M, F = N x N where N = #params and M = #outputs (in DL M = 1! so ∇J = N x 1)
-    # Note: s^T H s (from paper) = ∇J^T (H^-1 ∇J <-- we know this already p_ngrad)
+    # theta = N x 1, ∇J = N x M, F = N x N where N = #params and M = #outputs (for scalar loss M = 1! so ∇J = N x 1)
+    # Note: s^T H s (from paper) = ∇J^T (H^-1 ∇J <-- we know this already; p_ngrad)
     # H^-1 ∇J = N x 1 ... then ∇J^T H^-1 ∇J = 1x1
     # thus turn both to vecs and dot prod to compute alpha 
     vec = lambda x: x.flatten()[:, None]
