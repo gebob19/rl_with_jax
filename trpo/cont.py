@@ -1,4 +1,4 @@
-# works :) 
+# doesnt work :(
 
 #%%
 import jax 
@@ -281,10 +281,12 @@ def D_KL_params(p1, p2, obs):
     return D_KL_Gauss(θ1, θ2)
 
 def pullback_mvp(f, rho, w, v):
+    # J 
     z, R_z = jax.jvp(f, (w,), (v,))
-    # rho diff 
+    # H J
     R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     _, f_vjp = jax.vjp(f, w)
+    # (HJ)^T J = J^T H J 
     return f_vjp(R_gz)[0]
 
 @jax.jit
@@ -416,47 +418,3 @@ try:
 
 except: 
     print('err!')
-
-# # %%
-# jit_natural_grad = jax.jit(natural_grad)
-# for i in range(sampled_rollout[0].shape[0]):
-#     print(i)
-#     sample = [r[i] for r in sampled_rollout]
-#     loss, info, p_ngrad, alpha, p_grads = jit_natural_grad(p_params, sample)
-#     print(loss)
-
-# # %%
-# i = 1995
-# sample = [r[i] for r in sampled_rollout]
-# loss, info, p_ngrad, alpha, p_grads = natural_grad(p_params, sample)
-
-# # %%
-# obs = sample[0]
-# (loss, info), p_grads = policy_loss_grad(p_params, sample)
-# f = lambda w: p_frwd(w, obs)
-# rho = D_KL_Gauss
-# p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-#         tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
-#         p_grads, maxiter=cg_iters)
-
-# # %%
-# pullback_mvp(f, rho, p_params, v)
-
-# # %%
-# # compute optimal step 
-# vec = lambda x: x.flatten()[:, None]
-# mat_mul = lambda x, Hx: (vec(x).T @ vec(Hx)).flatten()
-# alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
-# alpha
-
-# #%%
-# bg = p_grads['linear']['b']
-# bng = p_ngrad['linear']['b']
-# np.maximum(vec(bg).T @ vec(bng), 1e-8).flatten()
-
-# #%%
-# D_KL_params(p_params, p_params, obs)
-
-# # %%
-
-# %%
