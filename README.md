@@ -3,6 +3,11 @@
 Single-file implementations focused on clarity rather than proper code standards :)
 
 ---
+TRPO: `TRPO/`
+- `trpo.py` = JAX with *discrete* actions
+- `cont.py` = JAX with *continious* actions
+
+---
 DQN: `qlearn.py`
 
 ---
@@ -33,3 +38,4 @@ A2C: `a2c/`
 - `a2c.py`/`a2c_multi.py` = JAX with single & multiprocessing 
 
 Note: A2C doesn't work that great -- should use PPO 
+
