@@ -55,6 +55,13 @@ def _critic_fcn(s):
     ])(s)
     return v 
 
+def normal_log_density(x, mean, std):
+    log_std = np.log(std)
+    var = np.power(std, 2)
+    log_density = -np.power(x - mean, 2) / (
+        2 * var) - 0.5 * np.log(2 * np.pi) - log_std
+    return np.sum(log_density, 1, keepdims=True)
+
 policy_fcn = hk.transform(_policy_fcn)
 policy_fcn = hk.without_apply_rng(policy_fcn)
 p_frwd = jax.jit(policy_fcn.apply)
@@ -340,9 +347,9 @@ def natural_grad(p_params, sample):
     rho = D_KL_Gauss
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
             tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
-            p_grads, maxiter=cg_iters, tol=1e-10)
+            p_grads, maxiter=cg_iters, tol=1e-10) ## tol is very! important 
     
-    # compute optimal step 
+    # compute optimal step (my way -- correct per-layer alpha?) 
     vec = lambda x: x.flatten()[:, None]
     # sometimes matMul is negative which when + np.sqrt results in NaN
     safe_mat_mul_denom = lambda x, Hx: np.maximum(vec(x).T @ vec(Hx), 1e-8).flatten()
@@ -370,51 +377,51 @@ p_step = 0
 v_step = 0 
 
 #%%
-try: 
-    # from tqdm import tqdm 
-    from tqdm.notebook import tqdm 
-    pbar = tqdm(total=max_n_steps)
-    while p_step < max_n_steps: 
-        # rollout
-        rng, subkey = jax.random.split(rng, 2) 
-        rollout = worker.rollout(p_params, v_params, subkey)
+# try: 
+from tqdm import tqdm 
+# from tqdm.notebook import tqdm 
+pbar = tqdm(total=max_n_steps)
+while p_step < max_n_steps: 
+    # rollout
+    rng, subkey = jax.random.split(rng, 2) 
+    rollout = worker.rollout(p_params, v_params, subkey)
 
-        # train
-        sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-        loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
-        p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
-        writer.add_scalar('info/ploss', loss.item(), p_step)
-        for k in info.keys(): 
-            writer.add_scalar(f'info/{k}', info[k].item(), p_step)
+    # train
+    sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
+    loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
+    p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+    writer.add_scalar('info/ploss', loss.item(), p_step)
+    for k in info.keys(): 
+        writer.add_scalar(f'info/{k}', info[k].item(), p_step)
 
-        p_step += 1
-        pbar.update(1)
+    p_step += 1
+    pbar.update(1)
 
-        # v_func
-        for _ in range(n_v_iters):
-            loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
-            writer.add_scalar('info/vloss', loss.item(), v_step)
-            v_step += 1
+    # v_func
+    for _ in range(n_v_iters):
+        loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
+        writer.add_scalar('info/vloss', loss.item(), v_step)
+        v_step += 1
+
+    # # metrics 
+    # for i, g in enumerate(jax.tree_leaves(p_params)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
     
-        # metrics 
-        for i, g in enumerate(jax.tree_leaves(p_params)): 
-            name = 'b' if len(g.shape) == 1 else 'w'
-            writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
-        
-        for i, g in enumerate(jax.tree_leaves(p_grads)): 
-            name = 'b' if len(g.shape) == 1 else 'w'
-            writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
-        
-        for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
-            name = 'b' if len(g.shape) == 1 else 'w'
-            writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
-        
-        for i, g in enumerate(jax.tree_leaves(alpha)): 
-            writer.add_scalar(f'alpha/{i}', g.item(), p_step)
+    # for i, g in enumerate(jax.tree_leaves(p_grads)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
+    
+    # for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
+    #     name = 'b' if len(g.shape) == 1 else 'w'
+    #     writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
+    
+    for i, g in enumerate(jax.tree_leaves(alpha)): 
+        writer.add_scalar(f'alpha/{i}', g.item(), p_step)
 
-        rng, subkey = jax.random.split(rng, 2)
-        r = eval(p_params, env, subkey)
-        writer.add_scalar('eval/total_reward', r, p_step)
+    rng, subkey = jax.random.split(rng, 2)
+    r = eval(p_params, env, subkey)
+    writer.add_scalar('eval/total_reward', r, p_step)
 
-except: 
-    print('err!')
+# except: 
+#     print('err!')
