@@ -32,25 +32,25 @@ assert -a_high == a_low
 #%%
 init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
-def mu_scale(mu):
-    return np.tanh(mu) * env.action_space.high
+# def mu_scale(mu):
+#     return np.tanh(mu) * a_high
 
 def _policy_fcn(s):
     # log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
     log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.zeros, dtype=np.float64)
     mu = hk.Sequential([
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(n_actions)
+        hk.Linear(64), np.tanh,
+        hk.Linear(64), np.tanh,
+        hk.Linear(n_actions, b_init=np.zeros)
     ])(s)
-    mu = mu_scale(mu)
+    # mu = mu_scale(mu)
     std = np.exp(log_std)
     return mu, std
 
 def _critic_fcn(s):
     v = hk.Sequential([
-        hk.Linear(64), jax.nn.relu,
-        hk.Linear(64), jax.nn.relu,
+        hk.Linear(64), np.tanh,
+        hk.Linear(64), np.tanh,
         hk.Linear(1), 
     ])(s)
     return v 
