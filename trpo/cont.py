@@ -200,7 +200,6 @@ seed = 85014 # onp.random.randint(1e5)
 
 max_n_steps = 1e6
 n_step_rollout = 25000
-n_p_iters = 10 
 # v training
 v_lr = 1e-3
 n_v_iters = 80
@@ -335,18 +334,23 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
     return p_params # no new weights 
 
 def line_search2(full_step, expected_improve_rate, p_params, rollout, n_iters=10, accept_ratio=0.1):
-    init_loss, _ = batch_policy_loss(p_params, rollout)
+    L = lambda p: batch_policy_loss(p, rollout)[0]
+    init_loss = L(p_params)
+    print("loss before", init_loss.item())
     for i in np.arange(n_iters):
         step_frac = .5 ** i
         step = tree_mult(full_step, step_frac)
         new_p_params = jax.tree_map(lambda p, s: p+s, p_params, step)
-        new_loss, _ = batch_policy_loss(new_p_params, rollout)
+        new_loss = L(new_p_params)
 
         actual_improve = init_loss - new_loss
         expected_improve = expected_improve_rate * step_frac
         ratio = actual_improve / expected_improve
 
-        if (actual_improve > 0) and (ratio > accept_ratio): 
+        print(f"{i} a/e/r", actual_improve.item(), expected_improve.item(), ratio.item())
+
+        if (actual_improve.item() > 0) and (ratio.item() > accept_ratio): 
+            print("loss after", new_loss.item())
             writer.add_scalar('info/line_search_n_iters', i, p_step)
             return new_p_params # new weights 
 
@@ -365,11 +369,9 @@ def natural_grad(p_params, sample):
     (loss, info), p_grads = policy_loss_grad(p_params, sample)
     f = lambda w: p_frwd(w, obs)
     rho = D_KL_Gauss
-    mvp = lambda v: pullback_mvp(f, rho, p_params, v)
+    mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda)
     neg_grads = jax.tree_map(lambda x: -1 * x, p_grads)
-    step_dir, _ = jax.scipy.sparse.linalg.cg(
-            tree_mvp_dampen(mvp, damp_lambda),
-            neg_grads, maxiter=cg_iters, tol=1e-10)
+    step_dir, _ = jax.scipy.sparse.linalg.cg(mvp, neg_grads, maxiter=cg_iters, tol=1e-10)
     
     # # compute optimal step (my way -- correct per-layer alpha?) 
     # vec = lambda x: x.flatten()[:, None]
@@ -391,7 +393,7 @@ def natural_grad(p_params, sample):
     fullstep = unflatten_fcn(fullstep)
     expected_improve_rate = neggdotstepdir / lm 
 
-    return loss, info, None, None, p_grads, (fullstep, expected_improve_rate)
+    return loss, info, None, None, None, (fullstep, expected_improve_rate, lm, flat_grads)
 
 @jax.jit
 def batch_natural_grad(p_params, batch):
@@ -446,7 +448,9 @@ while p_step < max_n_steps:
     # loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
     # p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
 
-    loss, info, _, _, _, (fullstep, expected_improve_rate) = batch_natural_grad(p_params, sampled_rollout)
+    loss, info, _, _, _, (fullstep, expected_improve_rate, lm, flat_grads) = batch_natural_grad(p_params, sampled_rollout)
+    print("lagrange multiplier:", lm.item(), "grad_norm:", np.linalg.norm(flat_grads).item())
+
     p_params = line_search2(fullstep, expected_improve_rate, p_params, rollout)
 
     writer.add_scalar('info/ploss', loss.item(), p_step)
@@ -485,9 +489,9 @@ while p_step < max_n_steps:
     # for i, g in enumerate(jax.tree_leaves(alpha)): 
     #     writer.add_scalar(f'alpha/{i}', g.item(), p_step)
 
-rng, subkey = jax.random.split(rng, 2)
-r = eval(p_params, env, subkey)
-writer.add_scalar('eval/total_reward', r, p_step)
+    rng, subkey = jax.random.split(rng, 2)
+    r = eval(p_params, env, subkey)
+    writer.add_scalar('eval/total_reward', r, p_step)
 
 # except: 
 #     print('err!')
