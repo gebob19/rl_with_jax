@@ -91,7 +91,7 @@ def policy(params, obs, rng):
     log_prob = dist.log_prob(a)
     return a, log_prob
 
-def eval(params, env, rng):
+def eval(p_frwd, params, env, rng):
     rewards = 0 
     states = []
     obs = env.reset()

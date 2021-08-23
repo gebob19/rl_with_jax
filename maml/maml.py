@@ -12,38 +12,23 @@ from functools import partial
 from env import Navigation2DEnv, Navigation2DEnv_Disc
 import cloudpickle
 import pathlib 
+import haiku as hk
 
 from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
 #%%
+from utils import disc_policy as policy 
+from utils import eval, init_policy_fcn, Disc_Vector_Buffer, discount_cumsum, \
+    tree_mean, mean_vmap_jit, sum_vmap_jit
+
 env_name = 'Navigation2D'
-env = Navigation2DEnv(max_n_steps=200) # maml debug env 
+env = Navigation2DEnv_Disc(max_n_steps=200) # maml debug env 
 
-n_actions = env.action_space.shape[0]
+n_actions = env.action_space.n
 obs_dim = env.observation_space.shape[0]
-
-a_high = env.action_space.high[0]
-a_low = env.action_space.low[0]
-
-print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim: {obs_dim}')
-assert -a_high == a_low
-
-import haiku as hk
-def _policy_fcn(s):
-    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.ones, dtype=np.float64)
-    mu = hk.Sequential([
-        hk.Linear(100), jax.nn.relu,
-        hk.Linear(100), jax.nn.relu,
-        hk.Linear(n_actions), np.tanh 
-    ])(s) * a_high
-    sig = np.exp(log_std)
-    return mu, sig
-
-policy_fcn = hk.transform(_policy_fcn)
-policy_fcn = hk.without_apply_rng(policy_fcn)
-p_frwd = jax.jit(policy_fcn.apply)
+print(f'[LOGGER] n_actions: {n_actions} obs_dim: {obs_dim}')
 
 # value function / baseline  
 # https://github.com/rll/rllab/blob/master/rllab/baselines/linear_feature_baseline.py
@@ -57,7 +42,9 @@ def v_fit(trajectories, feature_fcn=v_features, reg_coeff=1e-5):
     featmat = np.concatenate([feature_fcn(traj['obs']) for traj in trajectories])
     r = np.concatenate([traj['r'] for traj in trajectories])
     for _ in range(5):
-        # solve argmin_x (F x = R) == argmin_x (F^T F x = F^T R) -- solvable
+        # solve argmin_x (F x = R) <-- unsolvable (F non-sqr) 
+        # == argmin_x (F^T F x = F^T R) <-- solvable (sqr F^T F)
+        # where F = Features, x = Weights, R = rewards
         _coeffs = np.linalg.lstsq(
             featmat.T.dot(featmat) + reg_coeff * np.identity(featmat.shape[1]),
             featmat.T.dot(r)
@@ -67,52 +54,22 @@ def v_fit(trajectories, feature_fcn=v_features, reg_coeff=1e-5):
         reg_coeff *= 10
     return np.zeros_like(_coeffs), 1 # err 
 
-@jax.jit 
-def policy(params, obs, rng):
-    mu, sig = p_frwd(params, obs)
-    rng, subrng = jax.random.split(rng)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
-    a = dist.sample(seed=subrng)
-    a = np.clip(a, a_low, a_high)
-    log_prob = dist.log_prob(a)
-    return a, log_prob
-
-@jax.jit 
-def eval_policy(params, obs, _):
-    a, _ = p_frwd(params, obs)
-    a = np.clip(a, a_low, a_high)
-    return a, None
-
-def eval(params, env, rng):
-    rewards = 0 
-    obs = env.reset()
-    while True: 
-        rng, subkey = jax.random.split(rng, 2)
-        a = eval_policy(params, obs, subkey)[0]
-        a = onp.array(a)
-        obs2, r, done, _ = env.step(a)        
-        obs = obs2 
-        rewards += r
-        if done: break 
-    return rewards
-
 def sample_trajectory(traj, p):
     traj_len = int(traj[0].shape[0] * p)
     idxs = onp.random.choice(traj_len, size=traj_len, replace=False)
     sampled_traj = jax.tree_map(lambda x: x[idxs], traj)
     return sampled_traj
 
-from utils import Cont_Vector_ReplayBuffer, discount_cumsum
 def rollout(env, p_params, rng):
-    buffer = Cont_Vector_ReplayBuffer(env, max_n_steps)
-    buffer.clear()
+    buffer = Disc_Vector_Buffer(obs_dim, max_n_steps)
     obs = env.reset()
     for _ in range(max_n_steps): 
         rng, subkey = jax.random.split(rng, 2)
-        a, log_prob = policy(p_params, obs, subkey)
+        a, log_prob = policy(p_frwd, p_params, obs, subkey, False)
 
         a = jax.lax.stop_gradient(a)
         log_prob = jax.lax.stop_gradient(log_prob)
+        a = a.item()
 
         obs2, r, done, _ = env.step(a)
         buffer.push((obs, a, r, obs2, done, log_prob))
@@ -123,19 +80,21 @@ def rollout(env, p_params, rng):
     trajectory = buffer.contents()
     return trajectory 
 
+#%%
 # inner optim 
 @jax.jit
-def reinforce_loss(p_params, obs, a, adv):
-    mu, sig = p_frwd(p_params, obs)
-    log_prob = distrax.MultivariateNormalDiag(mu, sig).log_prob(a)
+def _reinforce_loss(p_params, obs, a, adv):
+    pi = p_frwd(p_params, obs)
+    log_prob = distrax.Categorical(probs=pi).log_prob(a)
     loss = -(log_prob * adv).sum()
     return loss
 
-def reinforce_loss_batch(p_params, obs, a, adv):
-    loss = jax.vmap(partial(reinforce_loss, p_params))(obs, a, adv).sum()
-    return loss
+# def reinforce_loss(p_params, obs, a, adv):
+#     loss = jax.vmap(partial(_reinforce_loss, p_params))(obs, a, adv).sum()
+#     return loss
 
-reinforce_loss_grad = jax.jit(jax.value_and_grad(reinforce_loss_batch))
+reinforce_loss = sum_vmap_jit(_reinforce_loss, (None, 0, 0, 0))
+reinforce_loss_grad = jax.jit(jax.value_and_grad(reinforce_loss))
 
 @jax.jit
 def sgd_step_int(params, grads, alpha):
@@ -150,16 +109,6 @@ def sgd_step_tree(params, grads, alphas):
 def sgd_step(params, grads, alpha):
     step_fcn = sgd_step_int if type(alpha) in [int, float] else sgd_step_tree
     return step_fcn(params, grads, alpha)
-
-@jax.jit
-def compute_advantage(W, traj):
-    # linear fcn predict
-    v_obs = v_features(traj['obs']) @ W
-    # baseline 
-    adv = traj['r'] - v_obs
-    # normalize 
-    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-    return adv.squeeze()
 
 # %%
 seed = onp.random.randint(1e5)
@@ -177,13 +126,13 @@ task_batch_size = 40
 train_n_traj = 20
 eval_n_traj = 40
 alpha = 0.1
+damp_lambda = 0.01
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
 
 ## model init
-obs = np.zeros(env.observation_space.shape)  # dummy input 
-p_params = policy_fcn.init(rng, obs) 
+p_frwd, p_params = init_policy_fcn('discrete', env, rng)
 
 ## save path 
 model_path = pathlib.Path(f'./models/maml/{env_name}')
@@ -194,6 +143,16 @@ task = env.sample_tasks(1)[0]
 env.reset_task(task)
 
 # %%
+@jax.jit
+def compute_advantage(W, traj):
+    # linear fcn predict
+    v_obs = v_features(traj['obs']) @ W
+    # baseline 
+    adv = traj['r'] - v_obs
+    # normalize 
+    adv = (adv - adv.mean()) / (adv.std() + 1e-8)
+    return adv.squeeze()
+
 def maml_inner(p_params, env, rng, n_traj, alpha):
     subkeys = jax.random.split(rng, n_traj) 
     trajectories = []
@@ -203,130 +162,110 @@ def maml_inner(p_params, env, rng, n_traj, alpha):
         trajectories.append(traj)
 
     W = v_fit(trajectories)[0]
+    for i in range(len(trajectories)): 
+        trajectories[i]['adv'] = compute_advantage(W, trajectories[i])
+    
     gradients = []
     for traj in trajectories:
-        adv = compute_advantage(W, traj)
-        _, grad = reinforce_loss_grad(p_params, traj['obs'], traj['a'], adv)
+        _, grad = reinforce_loss_grad(p_params, traj['obs'], traj['a'], traj['adv'])
         gradients.append(grad)
     grads = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
     inner_params_p = sgd_step(p_params, grads, alpha)
 
     return inner_params_p, W
 
-n_traj = 2
-newp, W = maml_inner(p_params, env, rng, 2, 0.1)
-1
+def _trpo_policy_loss(p_params, obs, a, adv, old_log_prob):
+    pi = p_frwd(p_params, obs)
+    dist = distrax.Categorical(probs=pi)
+    ratio = np.exp(dist.log_prob(a) - old_log_prob)
+    loss = -(ratio * adv).sum()
+    return loss
 
-# %%
-rng, subkey = jax.random.split(rng, 2) 
-traj = rollout(env, p_params, subkey) 
+trpo_policy_loss = mean_vmap_jit(_trpo_policy_loss, (None, *([0]*4)))
 
-traj['adv'] = compute_advantage(W, traj)
-s_traj = sample(traj, 0.1)
-1
+def maml_outer(p_params, env, rng):
+    subkeys = jax.random.split(rng, 3)
+    newp, W = maml_inner(p_params, env, subkeys[0], train_n_traj, 0.1)
 
-#%%
-loss, p_ngrad, alpha = batch_natural_grad(p_params, 
-    s_traj['obs'], s_traj['a'], s_traj['adv'])
+    traj = rollout(env, p_params, subkeys[1]) 
+    adv = compute_advantage(W, traj)
+    loss = trpo_policy_loss(newp, traj['obs'], traj['a'], adv, traj['log_prob'])
+    return loss, traj
+
+(loss, traj), grads = jax.value_and_grad(maml_outer, has_aux=True)(p_params, env, rng)
 loss
 
-#%%
-obs, a, adv = s_traj['obs'][0], s_traj['a'][0], s_traj['adv'][0]
+# grads = grad(maml_outer)
+# compute natural gradient 
+# line search step 
 
-#%%
-natural_grad(p_params, obs, a, adv)
-
-#%%
-loss, p_grads = jax.value_and_grad(reinforce_loss)(p_params, obs, a, adv)
-f = lambda w: p_frwd(w, obs)
-rho = D_KL_Gauss
-mvp = pullback_mvp(f, rho, p_params, p_grads)
-1
-
-#%%
-for p in jax.tree_leaves(p_ngrad):
-    print(p.sum(), p.shape)
-
-#%%
-p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-        lambda v: pullback_mvp(f, rho, p_params, v),
-        p_grads, maxiter=cg_iters)
-
-#%%
-### TRPO FCNS 
-def hvp(J, w, v):
-    return jax.jvp(jax.grad(J), (w,), (v,))[1]
-
-# https://stats.stackexchange.com/questions/7440/kl-divergence-between-two-univariate-gaussians
-def D_KL_Gauss(θ1, θ2):
-    𝜇1, 𝜎1 = θ1
-    𝜇2, 𝜎2 = θ2
-    d_kl = np.log((𝜎2 / 𝜎1)+1e-8) + (𝜎1**2 + (𝜇1 - 𝜇2)**2) / (2*𝜎2**2 +1e-8) - .5
-    d_kl = d_kl.sum() # sum over n_actions 
-    return d_kl
-
-def D_KL_params(p1, p2, obs):
-    θ1, θ2 = p_frwd(p1, obs), p_frwd(p2, obs)
-    return D_KL_Gauss(θ1, θ2)
-
-def pullback_mvp(f, rho, w, v):
-    z, R_z = jax.jvp(f, (w,), (v,))
-    # rho diff 
-    R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
-    _, f_vjp = jax.vjp(f, w)
-    return f_vjp(R_gz)[0]
-
-@jax.jit
-def sgd_step(params, grads, alpha):
-    sgd_update = lambda param, grad: param - alpha * grad
-    return jax.tree_multimap(sgd_update, params, grads)
-
-@jax.jit
-def sgd_step_tree(params, grads, alphas):
-    sgd_update = lambda param, grad, alpha: param - alpha * grad
-    return jax.tree_multimap(sgd_update, params, grads, alphas)
-
-# backtracking line-search 
-tree_divide = lambda tree, denom: jax.tree_map(lambda x: x / denom, tree)
-def line_search(alpha_start, init_loss, p_params, p_ngrad, traj, n_iters, delta):
-    for i in np.arange(n_iters):
-        alpha = tree_divide(alpha_start, 2 ** i)
-        new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
-
-        new_loss = reinforce_loss_batch(new_p_params, traj['obs'], traj['a'], traj['adv'])
-
-        d_kl = jax.vmap(partial(D_KL_params, new_p_params, p_params))(traj['obs']).mean()
-
-        if (new_loss < init_loss) and (d_kl <= delta): 
-            return new_p_params # new weights 
-    return p_params # no new weights 
-
-def natural_grad(p_params, obs, a, adv):
-    loss, p_grads = jax.value_and_grad(reinforce_loss)(p_params, obs, a, adv)
+# %%
+def _natural_gradient(params, grads, obs):
     f = lambda w: p_frwd(w, obs)
-    rho = D_KL_Gauss
-    p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-            lambda v: pullback_mvp(f, rho, p_params, v),
-            p_grads, maxiter=cg_iters)
-    
-    # compute optimal step 
+    rho = D_KL_probs
+    ngrad, _ = jax.scipy.sparse.linalg.cg(
+            tree_mvp_dampen(lambda v: gnh_vp(f, rho, params, v), damp_lambda),
+            grads, maxiter=cg_iters)
+
     vec = lambda x: x.flatten()[:, None]
     mat_mul = lambda x, y: np.sqrt(2 * delta / (vec(x).T @ vec(y)).flatten())
-    alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
+    alpha = jax.tree_multimap(mat_mul, grads, ngrad)
+    return ngrad, alpha
+natural_gradient = mean_vmap_jit(_natural_gradient, (None, 0))
 
-    return loss, p_ngrad, alpha
+ngrad, alpha = natural_gradient(p_params, grads, traj['obs'])
+alpha
 
-@jax.jit
-def batch_natural_grad(p_params, obs, a, adv):
-    out = jax.vmap(partial(natural_grad, p_params))(obs, a, adv)
-    out = jax.tree_map(lambda x: x.mean(0), out)
-    return out
+# %%
+probs = p_frwd(p_params, traj['obs'][0])
+probs
+
+# %%
+jax.hessian(D_KL_probs)(probs, np.array(onp.array([0.55, 0.1, 0.25, 0.1])))
+
+# %%
+# %%
+# %%
+#%%
+### TRPO FCNS 
+from utils import gnh_vp, tree_mvp_dampen
+
+def D_KL_probs(p1, p2):
+    d_kl = (p1 * (np.log(p1) - np.log(p2))).sum()
+    return d_kl
+
+def D_KL_probs_params(param1, param2, obs):
+    p1, p2 = p_frwd(param1, obs), p_frwd(param2, obs)
+    return D_KL_probs(p1, p2)
 
 def sample(traj, p):
     traj_len = int(traj['obs'].shape[0] * p)
     idxs = onp.random.choice(traj_len, size=traj_len, replace=False)
     sampled_traj = jax.tree_map(lambda x: x[idxs], traj)
     return sampled_traj
+
+import operator
+tree_scalar_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree)
+tree_scalar_divide = tree_scalar_op(operator.truediv)
+tree_scalar_mult = tree_scalar_op(operator.mul)
+
+# backtracking line-search 
+def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
+    obs = rollout[0]
+    for i in np.arange(n_iters):
+        alpha = tree_scalar_divide(alpha_start, 2 ** i)
+
+        new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
+        new_loss = batch_policy_loss(new_p_params, rollout)
+
+        d_kl = jax.vmap(partial(D_KL_probs_params, new_p_params, p_params))(obs).mean()
+
+        if (new_loss < init_loss) and (d_kl <= delta): 
+            writer.add_scalar('info/line_search_n_iters', i, e)
+            return new_p_params # new weights 
+
+    writer.add_scalar('info/line_search_n_iters', -1, e)
+    return p_params # no new weights 
 
 # %%
 

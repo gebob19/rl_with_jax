@@ -36,8 +36,8 @@ def mu_scale(mu):
     return np.tanh(mu) * env.action_space.high
 
 def _policy_fcn(s):
-    log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
-    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=log_std_init, dtype=np.float64)
+    # log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
+    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.zeros, dtype=np.float64)
     mu = hk.Sequential([
         hk.Linear(64), jax.nn.relu,
         hk.Linear(64), jax.nn.relu,
@@ -340,7 +340,7 @@ def natural_grad(p_params, sample):
     rho = D_KL_Gauss
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
             tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
-            p_grads, maxiter=cg_iters)
+            p_grads, maxiter=cg_iters, tol=1e-10)
     
     # compute optimal step 
     vec = lambda x: x.flatten()[:, None]
