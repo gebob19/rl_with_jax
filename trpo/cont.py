@@ -36,8 +36,8 @@ init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 #     return np.tanh(mu) * a_high
 
 def _policy_fcn(s):
-    log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
-    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=log_std_init, dtype=np.float64)
+    # log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
+    log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.zeros, dtype=np.float64)
     mu = hk.Sequential([
         hk.Linear(64), np.tanh,
         hk.Linear(64), np.tanh,
@@ -340,7 +340,7 @@ def natural_grad(p_params, sample):
     rho = D_KL_Gauss
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
             tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
-            p_grads, maxiter=cg_iters)
+            p_grads, maxiter=cg_iters, tol=1e-10)
     
     # compute optimal step 
     vec = lambda x: x.flatten()[:, None]
@@ -354,7 +354,7 @@ def natural_grad(p_params, sample):
 @jax.jit
 def batch_natural_grad(p_params, batch):
     out = jax.vmap(partial(natural_grad, p_params))(batch)
-    out = jax.tree_map(lambda x: x.mean(0), out)
+    out = tree_mean(out)
     return out
 
 def sample_rollout(rollout, p):

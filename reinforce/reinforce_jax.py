@@ -12,42 +12,42 @@ config.update("jax_enable_x64", True)
 config.update("jax_debug_nans", True) # break on nans
 
 #%%
-# env_name = 'CartPole-v0'
-# env = gym.make(env_name)
+env_name = 'CartPole-v0'
+env = gym.make(env_name)
 
-from tmp import Navigation2DEnv_Disc
-env_name = 'Navigation2D'
-def make_env(init_task=False):
-    env = Navigation2DEnv_Disc(max_n_steps=200)
+# from tmp import Navigation2DEnv_Disc
+# env_name = 'Navigation2D'
+# def make_env(init_task=False):
+#     env = Navigation2DEnv_Disc(max_n_steps=200)
     
-    if init_task: 
-        env.seed(0)
-        task = env.sample_tasks(1)[0]
-        print(f'[LOGGER]: task = {task}')
-        env.reset_task(task)
+#     if init_task: 
+#         env.seed(0)
+#         task = env.sample_tasks(1)[0]
+#         print(f'[LOGGER]: task = {task}')
+#         env.reset_task(task)
 
-        # log max reward 
-        goal = env._task['goal']
-        x, y = goal
-        n_right = x / 0.1
-        n_up = y / 0.1
-        action_seq = []
-        for _ in range(int(abs(n_right))): action_seq.append(3 if n_right > 0 else 2)
-        for _ in range(int(abs(n_up))): action_seq.append(0 if n_up > 0 else 1)
+#         # log max reward 
+#         goal = env._task['goal']
+#         x, y = goal
+#         n_right = x / 0.1
+#         n_up = y / 0.1
+#         action_seq = []
+#         for _ in range(int(abs(n_right))): action_seq.append(3 if n_right > 0 else 2)
+#         for _ in range(int(abs(n_up))): action_seq.append(0 if n_up > 0 else 1)
 
-        reward = 0 
-        step_count = 0 
-        env.reset()
-        for a in action_seq: 
-            _, r, done, _ = env.step(a)
-            reward += r
-            step_count += 1 
-            if done: break 
-        assert done 
-        print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
-    return env 
+#         reward = 0 
+#         step_count = 0 
+#         env.reset()
+#         for a in action_seq: 
+#             _, r, done, _ = env.step(a)
+#             reward += r
+#             step_count += 1 
+#             if done: break 
+#         assert done 
+#         print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+#     return env 
 
-env = make_env(init_task=True)
+# env = make_env(init_task=True)
 
 n_actions = env.action_space.n 
 obs_dim = env.observation_space.shape[0]
@@ -136,6 +136,7 @@ max_n_steps = 100000
 
 rng = jax.random.PRNGKey(seed)
 onp.random.seed(seed)
+env.seed(seed)
 
 obs = env.reset() # dummy input 
 p_params = policy_fcn.init(rng, obs) 

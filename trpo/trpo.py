@@ -224,13 +224,13 @@ def critic_step(v_params, opt_state, batch):
 def hvp(J, w, v):
     return jax.jvp(jax.grad(J), (w,), (v,))[1]
 
-def D_KL(p1, p2):
+def D_KL_probs(p1, p2):
     d_kl = (p1 * (np.log(p1) - np.log(p2))).sum()
     return d_kl
 
-def D_KL_params(param1, param2, obs):
+def D_KL_probs_params(param1, param2, obs):
     p1, p2 = p_frwd(param1, obs), p_frwd(param2, obs)
-    return D_KL(p1, p2)
+    return D_KL_probs(p1, p2)
 
 def pullback_mvp(f, rho, w, v):
     z, R_z = jax.jvp(f, (w,), (v,))
@@ -262,7 +262,7 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
         new_p_params = sgd_step_tree(p_params, p_ngrad, alpha)
         new_loss = batch_policy_loss(new_p_params, rollout)
 
-        d_kl = jax.vmap(partial(D_KL_params, new_p_params, p_params))(obs).mean()
+        d_kl = jax.vmap(partial(D_KL_probs_params, new_p_params, p_params))(obs).mean()
 
         if (new_loss < init_loss) and (d_kl <= delta): 
             writer.add_scalar('info/line_search_n_iters', i, e)
@@ -280,7 +280,7 @@ def natural_grad(p_params, sample):
     obs = sample[0]
     loss, p_grads = jax.value_and_grad(policy_loss)(p_params, sample)
     f = lambda w: p_frwd(w, obs)
-    rho = D_KL
+    rho = D_KL_probs
     p_ngrad, _ = jax.scipy.sparse.linalg.cg(
             tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
             p_grads, maxiter=cg_iters)
