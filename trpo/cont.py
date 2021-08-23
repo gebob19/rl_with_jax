@@ -463,7 +463,7 @@ while p_step < max_n_steps:
     # v update 
     flat_v_params, unflatten_fcn = jax.flatten_util.ravel_pytree(v_params)
     v_loss_fcn = lambda p: batch_critic_loss(unflatten_fcn(p), rollout).astype(np.double)
-    v_loss_grad_fcn = jax.jit(lambda p: jax.tree_map(lambda x: onp.array(x).astype(onp.double), jax.value_and_grad(v_loss_fcn)(p)))
+    v_loss_grad_fcn = lambda p: jax.tree_map(lambda x: onp.array(x).astype(onp.double), jax.value_and_grad(v_loss_fcn)(p))
     flat_vp_params, _, _ = scipy.optimize.fmin_l_bfgs_b(v_loss_grad_fcn, onp.array(flat_v_params).astype(onp.double), maxiter=25)
     v_params = unflatten_fcn(flat_vp_params)
 
