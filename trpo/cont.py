@@ -33,7 +33,7 @@ assert -a_high == a_low
 init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
 
 def mu_scale(mu):
-    return np.tanh(mu) * a_high
+    return np.tanh(mu) * env.action_space.high
 
 def _policy_fcn(s):
     log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
@@ -351,7 +351,7 @@ def natural_grad(p_params, sample):
 @jax.jit
 def batch_natural_grad(p_params, batch):
     out = jax.vmap(partial(natural_grad, p_params))(batch)
-    out = jax.tree_map(lambda x: x.mean(0), out)
+    out = tree_mean(out)
     return out
 
 def sample_rollout(rollout, p):
