@@ -10,6 +10,7 @@ import gym
 from functools import partial
 import cloudpickle
 import haiku as hk
+import scipy 
 
 from jax.config import config
 config.update("jax_enable_x64", True) 
@@ -424,9 +425,14 @@ v_step = 0
 # new_p = line_search2(fullstep, expected_improve_rate, p_params, rollout)
 
 #%%
+# import scipy 
+# flat_v_params, unflatten_fcn = jax.flatten_util.ravel_pytree(v_params)
+# loss = lambda p: batch_critic_loss(unflatten_fcn(p), rollout).astype(np.double)
+# loss_grad_fcn = lambda p: jax.tree_map(lambda x: onp.array(x).astype(onp.double), jax.value_and_grad(loss)(p))
+# flat_vp_params, _, _ = scipy.optimize.fmin_l_bfgs_b(loss_grad_fcn, onp.array(flat_v_params).astype(onp.double), maxiter=25)
+# v_params = unflatten_fcn(flat_vp_params)
+
 #%%
-#%%
-# try: 
 from tqdm import tqdm 
 # from tqdm.notebook import tqdm 
 pbar = tqdm(total=max_n_steps)
@@ -450,11 +456,18 @@ while p_step < max_n_steps:
     p_step += 1
     pbar.update(1)
 
-    # v_func
-    for _ in range(n_v_iters):
-        loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
-        writer.add_scalar('info/vloss', loss.item(), v_step)
-        v_step += 1
+    # v update 
+    flat_v_params, unflatten_fcn = jax.flatten_util.ravel_pytree(v_params)
+    v_loss_fcn = lambda p: batch_critic_loss(unflatten_fcn(p), rollout).astype(np.double)
+    v_loss_grad_fcn = jax.jit(lambda p: jax.tree_map(lambda x: onp.array(x).astype(onp.double), jax.value_and_grad(v_loss_fcn)(p)))
+    flat_vp_params, _, _ = scipy.optimize.fmin_l_bfgs_b(v_loss_grad_fcn, onp.array(flat_v_params).astype(onp.double), maxiter=25)
+    v_params = unflatten_fcn(flat_vp_params)
+
+    # # v_func
+    # for _ in range(n_v_iters):
+    #     loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
+    #     writer.add_scalar('info/vloss', loss.item(), v_step)
+    #     v_step += 1
 
     # # metrics 
     # for i, g in enumerate(jax.tree_leaves(p_params)): 
