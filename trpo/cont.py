@@ -333,6 +333,25 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
     writer.add_scalar('info/line_search_n_iters', -1, p_step)
     return p_params # no new weights 
 
+def line_search2(full_step, expected_improve_rate, p_params, rollout, n_iters=10, accept_ratio=0.1):
+    init_loss, _ = batch_policy_loss(p_params, rollout)
+    for i in np.arange(n_iters):
+        step_frac = .5 ** i
+        step = tree_mult(full_step, step_frac)
+        new_p_params = jax.tree_map(lambda p, s: p+s, p_params, step)
+        new_loss, _ = batch_policy_loss(new_p_params, rollout)
+
+        actual_improve = init_loss - new_loss
+        expected_improve = expected_improve_rate * step_frac
+        ratio = actual_improve / expected_improve
+
+        if (actual_improve > 0) and (ratio > accept_ratio): 
+            writer.add_scalar('info/line_search_n_iters', i, p_step)
+            return new_p_params # new weights 
+
+    writer.add_scalar('info/line_search_n_iters', -1, p_step)
+    return p_params # no new weights 
+
 policy_loss_grad = jax.jit(jax.value_and_grad(policy_loss, has_aux=True))
 
 def tree_mvp_dampen(mvp, lmbda=0.1):
@@ -345,18 +364,33 @@ def natural_grad(p_params, sample):
     (loss, info), p_grads = policy_loss_grad(p_params, sample)
     f = lambda w: p_frwd(w, obs)
     rho = D_KL_Gauss
-    p_ngrad, _ = jax.scipy.sparse.linalg.cg(
-            tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda),
-            p_grads, maxiter=cg_iters, tol=1e-10) ## tol is very! important 
+    mvp = lambda v: pullback_mvp(f, rho, p_params, v)
+    neg_grads = jax.tree_map(lambda x: -1 * x, p_grads)
+    step_dir, _ = jax.scipy.sparse.linalg.cg(
+            tree_mvp_dampen(mvp, damp_lambda),
+            neg_grads, maxiter=cg_iters, tol=1e-10)
     
-    # compute optimal step (my way -- correct per-layer alpha?) 
-    vec = lambda x: x.flatten()[:, None]
-    # sometimes matMul is negative which when + np.sqrt results in NaN
-    safe_mat_mul_denom = lambda x, Hx: np.maximum(vec(x).T @ vec(Hx), 1e-8).flatten()
-    mat_mul = lambda x, Hx: np.sqrt(2 * delta / safe_mat_mul_denom(x, Hx))
-    alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
+    # # compute optimal step (my way -- correct per-layer alpha?) 
+    # vec = lambda x: x.flatten()[:, None]
+    # # sometimes matMul is negative which when + np.sqrt results in NaN
+    # safe_mat_mul_denom = lambda x, Hx: np.maximum(vec(x).T @ vec(Hx), 1e-8).flatten()
+    # mat_mul = lambda x, Hx: np.sqrt(2 * delta / safe_mat_mul_denom(x, Hx))
+    # alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
 
-    return loss, info, p_ngrad, alpha, p_grads
+    flat_step_dir, unflatten_fcn = jax.flatten_util.ravel_pytree(step_dir)
+    flat_step_dir_mvp, _ = jax.flatten_util.ravel_pytree(mvp(step_dir))
+    
+    shs = .5 * (flat_step_dir * flat_step_dir_mvp).sum()
+    lm = np.sqrt(shs / delta)
+    fullstep = flat_step_dir / lm
+
+    flat_grads, _ = jax.flatten_util.ravel_pytree(p_grads)
+    neggdotstepdir = (-flat_grads * flat_step_dir).sum()
+
+    fullstep = unflatten_fcn(fullstep)
+    expected_improve_rate = neggdotstepdir / lm 
+
+    return loss, info, None, None, p_grads, (fullstep, expected_improve_rate)
 
 @jax.jit
 def batch_natural_grad(p_params, batch):
@@ -376,6 +410,21 @@ writer = SummaryWriter(comment=f'trpo_{env_name}_seed={seed}_nrollout={n_step_ro
 p_step = 0 
 v_step = 0 
 
+# #%%
+# rng, subkey = jax.random.split(rng, 2) 
+# rollout = worker.rollout(p_params, v_params, subkey)
+
+# #%%
+# # train
+# sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
+# loss, info, p_ngrad, alpha, p_grads, (fullstep, expected_improve_rate) = batch_natural_grad(p_params, sampled_rollout)
+# loss, expected_improve_rate
+
+# #%%
+# new_p = line_search2(fullstep, expected_improve_rate, p_params, rollout)
+
+#%%
+#%%
 #%%
 # try: 
 from tqdm import tqdm 
@@ -388,8 +437,12 @@ while p_step < max_n_steps:
 
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-    loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
-    p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+    # loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
+    # p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
+
+    loss, info, _, _, _, (fullstep, expected_improve_rate) = batch_natural_grad(p_params, sampled_rollout)
+    p_params = line_search2(fullstep, expected_improve_rate, p_params, rollout)
+
     writer.add_scalar('info/ploss', loss.item(), p_step)
     for k in info.keys(): 
         writer.add_scalar(f'info/{k}', info[k].item(), p_step)
@@ -416,12 +469,12 @@ while p_step < max_n_steps:
     #     name = 'b' if len(g.shape) == 1 else 'w'
     #     writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
     
-    for i, g in enumerate(jax.tree_leaves(alpha)): 
-        writer.add_scalar(f'alpha/{i}', g.item(), p_step)
+    # for i, g in enumerate(jax.tree_leaves(alpha)): 
+    #     writer.add_scalar(f'alpha/{i}', g.item(), p_step)
 
-    rng, subkey = jax.random.split(rng, 2)
-    r = eval(p_params, env, subkey)
-    writer.add_scalar('eval/total_reward', r, p_step)
+rng, subkey = jax.random.split(rng, 2)
+r = eval(p_params, env, subkey)
+writer.add_scalar('eval/total_reward', r, p_step)
 
 # except: 
 #     print('err!')
