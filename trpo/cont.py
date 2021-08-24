@@ -443,9 +443,9 @@ def natural_grad(p_params, p_grads, sample):
 
     step_dir = conjugate_gradients(flat_mvp, -flat_grads, 10)
     
-    shs = .5 * (step_dir * flat_mvp(step_dir)).sum()
-    lm = np.sqrt(shs / 1e-2)
-    fullstep = step_dir / lm
+    shs = .5 * (step_dir * flat_mvp(step_dir)).sum() # (xAx)/2
+    lm = np.sqrt(shs / 1e-2)  # sqrt(xAx / 2*delta)
+    fullstep = step_dir / lm # sqrt(2*delta / xAx) * ∇J
 
     neggdotstepdir = (-flat_grads * step_dir).sum()
 
