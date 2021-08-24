@@ -266,7 +266,7 @@ class Worker:
         (obs, a, _, _, _, log_prob) = rollout
         rollout = (obs, a, log_prob, v_target, advantages)
         
-        return rollout
+        return rollout, onp.mean(self.epi_rewards)
 
 def optim_update_fcn(optim):
     @jax.jit
@@ -434,25 +434,6 @@ def tree_mvp_dampen(mvp, lmbda=0.1):
     damp_mvp = lambda v: jax.tree_multimap(dampen_fcn, mvp(v), v)
     return damp_mvp
 
-def jax_conjugate_gradients(Avp, b, nsteps, residual_tol=1e-10):
-    x = np.zeros_like(b)
-    r = np.zeros_like(b) + b 
-    p = np.zeros_like(b) + b 
-    rdotr = np.dot(r, r)
-    for i in range(nsteps):
-        _Avp = Avp(p)
-        alpha = rdotr / np.dot(p, _Avp)
-        x += alpha * p
-        r -= alpha * _Avp
-        new_rdotr = np.dot(r, r)
-        betta = new_rdotr / rdotr
-        p = r + betta * p
-        rdotr = new_rdotr
-        
-        if rdotr < residual_tol:
-            break
-    return x
-
 def lax_jax_conjugate_gradients(Avp, b, nsteps):
     x = np.zeros_like(b)
     r = np.zeros_like(b) + b 
@@ -512,7 +493,7 @@ def natural_grad(p_params, p_grads, sample):
     return None, None, None, None, None, (fullstep, expected_improve_rate, lm, flat_grads)
 
 def batch_natural_grad(p_params, batch):
-    (loss, info), p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch))
+    (loss, info), p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch)) ## VERY important to mean FIRST
     out = jax.vmap(partial(natural_grad, p_params, p_grads))(batch)
     out = tree_mean(out)
     return out
@@ -557,7 +538,8 @@ pbar = tqdm(total=max_n_steps)
 while p_step < max_n_steps: 
     # rollout
     rng, subkey = jax.random.split(rng, 2) 
-    rollout = worker.rollout(p_params, v_params, subkey)
+    rollout, mean_reward = worker.rollout(p_params, v_params, subkey)
+    writer.add_scalar('eval/total_reward', mean_reward, p_step)
 
     # train
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
@@ -605,9 +587,9 @@ while p_step < max_n_steps:
     # for i, g in enumerate(jax.tree_leaves(alpha)): 
     #     writer.add_scalar(f'alpha/{i}', g.item(), p_step)
 
-    rng, subkey = jax.random.split(rng, 2)
-    r = eval(p_params, env, subkey)
-    writer.add_scalar('eval/total_reward', r, p_step)
+    # rng, subkey = jax.random.split(rng, 2)
+    # r = eval(p_params, env, subkey)
+    # writer.add_scalar('eval/total_reward', mean_reward, p_step)
 
 # except: 
 #     print('err!')
