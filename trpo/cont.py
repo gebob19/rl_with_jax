@@ -56,13 +56,6 @@ def _critic_fcn(s):
     ])(s)
     return v 
 
-def normal_log_density(x, mean, std):
-    log_std = np.log(std)
-    var = np.power(std, 2)
-    log_density = -np.power(x - mean, 2) / (
-        2 * var) - 0.5 * np.log(2 * np.pi) - log_std
-    return np.sum(log_density, 1, keepdims=True)
-
 policy_fcn = hk.transform(_policy_fcn)
 policy_fcn = hk.without_apply_rng(policy_fcn)
 p_frwd = jax.jit(policy_fcn.apply)
@@ -72,13 +65,27 @@ critic_fcn = hk.without_apply_rng(critic_fcn)
 v_frwd = jax.jit(critic_fcn.apply)
 
 #%%
+def normal_log_density(x, mean, std):
+    log_std = np.log(std)
+    var = np.power(std, 2)
+    log_density = -np.power(x - mean, 2) / (
+        2 * var) - 0.5 * np.log(2 * np.pi) - log_std
+    return np.sum(log_density)
+
+def sample(mean, std, rng):
+    return jax.random.normal(rng) * std + mean 
+
 @jax.jit 
 def policy(params, obs, rng):
     mu, std = p_frwd(params, obs)
-    dist = distrax.MultivariateNormalDiag(mu, std)
-    a = dist.sample(seed=rng)
+    a = sample(mu, std, rng)
     a = np.clip(a, a_low, a_high)
-    log_prob = dist.log_prob(a)
+    log_prob = normal_log_density(a, mu, std)
+
+    # dist = distrax.MultivariateNormalDiag(mu, std)
+    # a = dist.sample(seed=rng)
+    # a = np.clip(a, a_low, a_high)
+    # log_prob = dist.log_prob(a)
     return a, log_prob
 
 @jax.jit 
@@ -309,11 +316,13 @@ def policy_loss(p_params, sample):
     (obs, a, old_log_prob, _, advantages) = sample 
 
     mu, std = p_frwd(p_params, obs)
-    dist = distrax.MultivariateNormalDiag(mu, std)
-    ratio = np.exp(dist.log_prob(a) - old_log_prob.squeeze())
-    loss = -(ratio * advantages.squeeze()).sum()
+    # dist = distrax.MultivariateNormalDiag(mu, std)
+    # log_prob = dist.log_prob(a)
+    log_prob = normal_log_density(a, mu, std)
+    ratio = np.exp(log_prob - old_log_prob)
+    loss = -(ratio * advantages).sum()
 
-    info = dict(entr=dist.entropy())
+    info = dict()
     return loss, info
 
 tree_mean = lambda tree: jax.tree_map(lambda x: x.mean(0), tree)
