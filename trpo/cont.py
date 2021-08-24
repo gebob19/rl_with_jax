@@ -115,22 +115,6 @@ class Vector_ReplayBuffer:
         self.i = 0 
         self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
 
-def eval(params, env, rng):
-    rewards = 0 
-    running_state = ZFilter((obs_dim,), clip=5)
-    obs = env.reset()
-    obs = running_state(obs)
-    while True: 
-        rng, subrng = jax.random.split(rng)
-        a = policy(params, obs, subrng)[0]
-        a = onp.array(a)
-        obs2, r, done, _ = env.step(a)        
-        obs2 = running_state(obs2)
-        obs = obs2 
-        rewards += r
-        if done: break 
-    return rewards
-
 def discount_cumsum(l, discount):
     l = onp.array(l)
     for i in range(len(l) - 1)[::-1]:
