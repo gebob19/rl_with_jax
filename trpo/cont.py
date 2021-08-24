@@ -4,20 +4,18 @@
 import jax 
 import jax.numpy as np 
 import numpy as onp 
-import distrax 
 import optax
 import gym 
-from functools import partial
-import cloudpickle
 import haiku as hk
 import scipy 
+import pybullet_envs # registers envs in gym 
 
+from functools import partial
 from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
 # env_name = 'Pendulum-v0' ## this env doesn't converge with TRPO (tried other impls too)
-import pybullet_envs
 env_name = 'HalfCheetahBulletEnv-v0' ## this works :)
 env = gym.make(env_name)
 
