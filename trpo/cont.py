@@ -1,4 +1,4 @@
-# doesnt work :(
+# works :)
 
 #%%
 import jax 
@@ -31,20 +31,13 @@ print(f'[LOGGER] a_high: {a_high} a_low: {a_low} n_actions: {n_actions} obs_dim:
 assert -a_high == a_low
 
 #%%
-init_final = hk.initializers.RandomUniform(-3e-3, 3e-3)
-
-# def mu_scale(mu):
-#     return np.tanh(mu) * a_high
-
 def _policy_fcn(s):
-    # log_std_init = lambda shape, dtype: -0.5*np.ones(shape, dtype)
     log_std = hk.get_parameter("log_std", shape=[n_actions,], init=np.zeros, dtype=np.float64)
     mu = hk.Sequential([
         hk.Linear(64), np.tanh,
         hk.Linear(64), np.tanh,
         hk.Linear(n_actions, b_init=np.zeros)
     ])(s)
-    # mu = mu_scale(mu)
     std = np.exp(log_std)
     return mu, std
 
@@ -81,18 +74,7 @@ def policy(params, obs, rng):
     a = sample(mu, std, rng)
     a = np.clip(a, a_low, a_high)
     log_prob = normal_log_density(a, mu, std)
-
-    # dist = distrax.MultivariateNormalDiag(mu, std)
-    # a = dist.sample(seed=rng)
-    # a = np.clip(a, a_low, a_high)
-    # log_prob = dist.log_prob(a)
     return a, log_prob
-
-@jax.jit 
-def eval_policy(params, obs, _):
-    a, _ = p_frwd(params, obs)
-    a = np.clip(a, a_low, a_high)
-    return a, None
 
 class Vector_ReplayBuffer:
     def __init__(self, buffer_capacity):
@@ -114,22 +96,6 @@ class Vector_ReplayBuffer:
     def clear(self):
         self.i = 0 
         self.buffer = onp.zeros((self.buffer_capacity, 2 * obs_dim + n_actions + 2 + 1))
-
-def eval(params, env, rng):
-    rewards = 0 
-    running_state = ZFilter((obs_dim,), clip=5)
-    obs = env.reset()
-    obs = running_state(obs)
-    while True: 
-        rng, subrng = jax.random.split(rng)
-        a = policy(params, obs, subrng)[0]
-        a = onp.array(a)
-        obs2, r, done, _ = env.step(a)        
-        obs2 = running_state(obs2)
-        obs = obs2 
-        rewards += r
-        if done: break 
-    return rewards
 
 def discount_cumsum(l, discount):
     l = onp.array(l)
@@ -316,8 +282,6 @@ def policy_loss(p_params, sample):
     (obs, a, old_log_prob, _, advantages) = sample 
 
     mu, std = p_frwd(p_params, obs)
-    # dist = distrax.MultivariateNormalDiag(mu, std)
-    # log_prob = dist.log_prob(a)
     log_prob = normal_log_density(a, mu, std)
     ratio = np.exp(log_prob - old_log_prob)
     loss = -(ratio * advantages).sum()
@@ -330,22 +294,6 @@ tree_mean = lambda tree: jax.tree_map(lambda x: x.mean(0), tree)
 @jax.jit
 def batch_policy_loss(p_params, batch):
     return tree_mean(jax.vmap(partial(policy_loss, p_params))(batch))
-
-def critic_loss(v_params, sample):
-    (obs, _, _, v_target, _) = sample 
-
-    v_obs = v_frwd(v_params, obs)
-    loss = (0.5 * ((v_obs - v_target) ** 2)).sum()
-    return loss
-
-def batch_critic_loss(v_params, batch):
-    return jax.vmap(partial(critic_loss, v_params))(batch).mean()
-
-@jax.jit
-def critic_step(v_params, opt_state, batch):
-    loss, grads = jax.value_and_grad(batch_critic_loss)(v_params, batch)
-    v_params, opt_state = v_update_fcn(v_params, grads, opt_state)
-    return loss, v_params, opt_state
 
 def hvp(J, w, v):
     return jax.jvp(jax.grad(J), (w,), (v,))[1]
@@ -373,7 +321,7 @@ def pullback_mvp(f, rho, w, v):
     # H J
     R_gz = hvp(lambda z1: rho(z, z1), z, R_z)
     _, f_vjp = jax.vjp(f, w)
-    # (HJ)^T J = J^T H J 
+    # (HJ)^T J = J^T H J (H is symmetric)
     return f_vjp(R_gz)[0]
 
 @jax.jit
@@ -386,8 +334,8 @@ def sgd_step_tree(params, grads, alphas):
     sgd_update = lambda param, grad, alpha: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads, alphas)
 
-tree_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree)
 import operator
+tree_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree)
 tree_divide = tree_op(operator.truediv)
 tree_mult = tree_op(operator.mul)
 
