@@ -397,7 +397,6 @@ def line_search_legit(full_step, expected_improve_rate, p_params, rollout, n_ite
     return p_params # no new weights 
 
 policy_loss_grad = jax.jit(jax.value_and_grad(policy_loss, has_aux=True))
-policy_grad = jax.jit(jax.grad(policy_loss, has_aux=True))
 
 def tree_mvp_dampen(mvp, lmbda=0.1):
     dampen_fcn = lambda mvp_, v_: mvp_ + lmbda * v_
@@ -496,6 +495,7 @@ while p_step < max_n_steps:
     flat_v_loss = lambda p: batch_critic_loss(unflatten_fcn(p), rollout)
     # scipy fcn requires onp array double outputs
     make_onp_double_tree = lambda x: jax.tree_map(lambda v: onp.array(v).astype(onp.double), x)
+    # value_and_grad tmp flat fcn ez 
     v_loss_grad_fcn = lambda p: make_onp_double_tree(jax.value_and_grad(flat_v_loss)(p))
     flat_vp_params, _, _ = scipy.optimize.fmin_l_bfgs_b(v_loss_grad_fcn, onp.array(flat_v_params).astype(onp.double), maxiter=25)
     v_params = unflatten_fcn(flat_vp_params)
