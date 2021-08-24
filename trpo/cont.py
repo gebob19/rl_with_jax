@@ -257,7 +257,8 @@ class Worker:
                 self.epi_rewards.append(self.epi_reward)
                 self.epi_reward = 0 
 
-        print(f'mean_reward = {onp.mean(self.epi_rewards)}')
+        mean_r = onp.mean(self.epi_rewards)
+        print(f'mean_reward = {mean_r}')
         self.epi_rewards = []
         
         # update rollout contents 
@@ -266,7 +267,7 @@ class Worker:
         (obs, a, _, _, _, log_prob) = rollout
         rollout = (obs, a, log_prob, v_target, advantages)
         
-        return rollout, onp.mean(self.epi_rewards)
+        return rollout, mean_r
 
 def optim_update_fcn(optim):
     @jax.jit
@@ -461,7 +462,7 @@ def lax_jax_conjugate_gradients(Avp, b, nsteps):
 
 def natural_grad(p_params, p_grads, sample):
     obs = sample[0]
-    f = lambda w: p_frwd(w, obs)
+    f = lambda w: tree_mean(jax.vmap(p_frwd, (None, 0))(w, obs))
     rho = D_KL_Gauss
     mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda) 
     flat_grads, unflatten_fcn = jax.flatten_util.ravel_pytree(p_grads)
@@ -494,8 +495,9 @@ def natural_grad(p_params, p_grads, sample):
 
 def batch_natural_grad(p_params, batch):
     (loss, info), p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch)) ## VERY important to mean FIRST
-    out = jax.vmap(partial(natural_grad, p_params, p_grads))(batch)
-    out = tree_mean(out)
+    # out = jax.vmap(partial(natural_grad, p_params, p_grads))(batch)
+    # out = tree_mean(out)
+    out = natural_grad(p_params, p_grads, batch)
     return out
 
 def sample_rollout(rollout, p):
