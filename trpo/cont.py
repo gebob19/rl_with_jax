@@ -110,12 +110,15 @@ class Vector_ReplayBuffer:
 
 def eval(params, env, rng):
     rewards = 0 
+    running_state = ZFilter((obs_dim,), clip=5)
     obs = env.reset()
+    obs = running_state(obs)
     while True: 
         rng, subrng = jax.random.split(rng)
         a = policy(params, obs, subrng)[0]
         a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
+        obs2 = running_state(obs2)
         obs = obs2 
         rewards += r
         if done: break 
@@ -155,6 +158,71 @@ def compute_advantage_targets(v_params, rollout):
     
     return adv, v_target
 
+# from https://github.com/joschu/modular_rl
+# http://www.johndcook.com/blog/standard_deviation/
+class RunningStat(object):
+    def __init__(self, shape):
+        self._n = 0
+        self._M = onp.zeros(shape)
+        self._S = onp.zeros(shape)
+
+    def push(self, x):
+        x = onp.asarray(x)
+        assert x.shape == self._M.shape
+        self._n += 1
+        if self._n == 1:
+            self._M[...] = x
+        else:
+            oldM = self._M.copy()
+            self._M[...] = oldM + (x - oldM) / self._n
+            self._S[...] = self._S + (x - oldM) * (x - self._M)
+
+    @property
+    def n(self):
+        return self._n
+
+    @property
+    def mean(self):
+        return self._M
+
+    @property
+    def var(self):
+        return self._S / (self._n - 1) if self._n > 1 else onp.square(self._M)
+
+    @property
+    def std(self):
+        return onp.sqrt(self.var)
+
+    @property
+    def shape(self):
+        return self._M.shape
+
+class ZFilter:
+    """
+    y = (x-mean)/std
+    using running estimates of mean,std
+    """
+
+    def __init__(self, shape, demean=True, destd=True, clip=10.0):
+        self.demean = demean
+        self.destd = destd
+        self.clip = clip
+
+        self.rs = RunningStat(shape)
+
+    def __call__(self, x, update=True):
+        if update: self.rs.push(x)
+        if self.demean:
+            x = x - self.rs.mean
+        if self.destd:
+            x = x / (self.rs.std + 1e-8)
+        if self.clip:
+            x = onp.clip(x, -self.clip, self.clip)
+        return x
+
+    def output_shape(self, input_space):
+        return input_space.shape
+
 class Worker:
     def __init__(self, n_steps):
         self.n_steps = n_steps
@@ -163,6 +231,10 @@ class Worker:
         # self.env = make_env()
         self.env = gym.make(env_name)
         self.obs = self.env.reset()
+        
+        self.running_state = ZFilter((obs_dim,), clip=5)
+        self.epi_reward = 0 
+        self.epi_rewards = []
 
     def rollout(self, p_params, v_params, rng):
         self.buffer.clear()
@@ -173,12 +245,19 @@ class Worker:
             a = onp.array(a)
 
             obs2, r, done, _ = self.env.step(a)
+            obs2 = self.running_state(onp.array(obs2))
+            self.epi_reward += r 
 
             self.buffer.push((self.obs, a, r, obs2, done, log_prob))
             self.obs = obs2
             if done: 
                 self.obs = self.env.reset()
+                self.obs = self.running_state(onp.array(self.obs))
+                
+                self.epi_rewards.append(self.epi_reward)
+                self.epi_reward = 0 
 
+        print(f'mean_reward = {onp.mean(self.epi_rewards)}')
         # update rollout contents 
         rollout = self.buffer.contents()
         advantages, v_target = compute_advantage_targets(v_params, rollout)
@@ -200,11 +279,8 @@ seed = 85014 # onp.random.randint(1e5)
 
 max_n_steps = 1e6
 n_step_rollout = 25000
-# v training
-v_lr = 1e-3
-n_v_iters = 80
 # gae 
-gamma = 0.99 
+gamma = 0.995
 lmbda = 0.97
 # trpo 
 delta = 0.01
@@ -224,14 +300,6 @@ make_f64 = lambda params: jax.tree_map(lambda x: x.astype(np.float64), params)
 p_params = make_f64(p_params)
 
 worker = Worker(n_step_rollout)
-
-optimizer = lambda lr: optax.chain(
-    optax.scale_by_adam(),
-    optax.scale(-lr),
-)
-v_optim = optimizer(v_lr)
-v_opt_state = v_optim.init(v_params)
-v_update_fcn = optim_update_fcn(v_optim)
 
 # %%
 def policy_loss(p_params, sample):
@@ -364,14 +432,20 @@ def tree_mvp_dampen(mvp, lmbda=0.1):
     damp_mvp = lambda v: jax.tree_multimap(dampen_fcn, mvp(v), v)
     return damp_mvp
 
+@jax.jit
 def natural_grad(p_params, sample):
     obs = sample[0]
     (loss, info), p_grads = policy_loss_grad(p_params, sample)
     f = lambda w: p_frwd(w, obs)
     rho = D_KL_Gauss
-    mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda)
+
+    mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda) 
     neg_grads = jax.tree_map(lambda x: -1 * x, p_grads)
-    step_dir, _ = jax.scipy.sparse.linalg.cg(mvp, neg_grads, maxiter=cg_iters, tol=1e-10)
+    flat_neg_grads, unflatten_fcn = jax.flatten_util.ravel_pytree(neg_grads)
+    flat_mvp = lambda v: jax.flatten_util.ravel_pytree(mvp(unflatten_fcn(v)))[0]
+
+    ## dont do this per grad -- r.T r will be different per layer :?
+    step_dir, _ = jax.scipy.sparse.linalg.cg(flat_mvp, flat_neg_grads, maxiter=cg_iters, tol=1e-10)
     
     # # compute optimal step (my way -- correct per-layer alpha?) 
     # vec = lambda x: x.flatten()[:, None]
@@ -380,24 +454,25 @@ def natural_grad(p_params, sample):
     # mat_mul = lambda x, Hx: np.sqrt(2 * delta / safe_mat_mul_denom(x, Hx))
     # alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
 
-    flat_step_dir, unflatten_fcn = jax.flatten_util.ravel_pytree(step_dir)
-    flat_step_dir_mvp, _ = jax.flatten_util.ravel_pytree(mvp(step_dir))
+    # flat_step_dir, unflatten_fcn = jax.flatten_util.ravel_pytree(step_dir)
+    # flat_step_dir_mvp, _ = jax.flatten_util.ravel_pytree(mvp(step_dir))
     
-    shs = .5 * (flat_step_dir * flat_step_dir_mvp).sum()
-    lm = np.sqrt(shs / delta)
-    fullstep = flat_step_dir / lm
+    shs = .5 * (step_dir * flat_mvp(step_dir)).sum()
+    lm = np.sqrt(shs / 1e-2)
+    fullstep = step_dir / lm
 
     flat_grads, _ = jax.flatten_util.ravel_pytree(p_grads)
-    neggdotstepdir = (-flat_grads * flat_step_dir).sum()
+    neggdotstepdir = (-flat_grads * step_dir).sum()
 
     fullstep = unflatten_fcn(fullstep)
     expected_improve_rate = neggdotstepdir / lm 
 
     return loss, info, None, None, None, (fullstep, expected_improve_rate, lm, flat_grads)
 
-@jax.jit
 def batch_natural_grad(p_params, batch):
     out = jax.vmap(partial(natural_grad, p_params))(batch)
+    loss, info,_,_,_, (fullstep, expected_improve_rate, lm, flat_grads) = out 
+    print('lms:', lm)
     out = tree_mean(out)
     return out
 
