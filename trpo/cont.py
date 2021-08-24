@@ -348,7 +348,7 @@ tree_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree
 tree_divide = tree_op(operator.truediv)
 tree_mult = tree_op(operator.mul)
 
-# my backtracking line-search 
+# my backtracking line-search :?
 def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
     obs = rollout[0]
     for i in np.arange(n_iters):
