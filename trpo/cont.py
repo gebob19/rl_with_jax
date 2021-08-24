@@ -290,10 +290,19 @@ def policy_loss(p_params, sample):
     return loss, info
 
 tree_mean = lambda tree: jax.tree_map(lambda x: x.mean(0), tree)
-
 @jax.jit
 def batch_policy_loss(p_params, batch):
     return tree_mean(jax.vmap(partial(policy_loss, p_params))(batch))
+
+def critic_loss(v_params, sample):
+    (obs, _, _, v_target, _) = sample 
+
+    v_obs = v_frwd(v_params, obs)
+    loss = (0.5 * ((v_obs - v_target) ** 2)).sum()
+    return loss
+
+def batch_critic_loss(v_params, batch):
+    return jax.vmap(partial(critic_loss, v_params))(batch).mean()
 
 def hvp(J, w, v):
     return jax.jvp(jax.grad(J), (w,), (v,))[1]
@@ -339,7 +348,7 @@ tree_op = lambda op: lambda tree, arg2: jax.tree_map(lambda x: op(x, arg2), tree
 tree_divide = tree_op(operator.truediv)
 tree_mult = tree_op(operator.mul)
 
-# backtracking line-search 
+# my backtracking line-search 
 def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, delta):
     obs = rollout[0]
     for i in np.arange(n_iters):
@@ -361,8 +370,10 @@ def line_search(alpha_start, init_loss, p_params, p_ngrad, rollout, n_iters, del
     writer.add_scalar('info/line_search_n_iters', -1, p_step)
     return p_params # no new weights 
 
-def line_search2(full_step, expected_improve_rate, p_params, rollout, n_iters=10, accept_ratio=0.1):
+# paper's code backtrack
+def line_search_legit(full_step, expected_improve_rate, p_params, rollout, n_iters=10, accept_ratio=0.1):
     L = lambda p: batch_policy_loss(p, rollout)[0]
+    
     init_loss = L(p_params)
     print("loss before", init_loss.item())
     for i in np.arange(n_iters):
@@ -386,13 +397,15 @@ def line_search2(full_step, expected_improve_rate, p_params, rollout, n_iters=10
     return p_params # no new weights 
 
 policy_loss_grad = jax.jit(jax.value_and_grad(policy_loss, has_aux=True))
+policy_grad = jax.jit(jax.grad(policy_loss, has_aux=True))
 
 def tree_mvp_dampen(mvp, lmbda=0.1):
     dampen_fcn = lambda mvp_, v_: mvp_ + lmbda * v_
     damp_mvp = lambda v: jax.tree_multimap(dampen_fcn, mvp(v), v)
     return damp_mvp
 
-def lax_jax_conjugate_gradients(Avp, b, nsteps):
+# jax.cg.linalg results in *VERY* different results compared to paper's code 
+def conjugate_gradients(Avp, b, nsteps):
     x = np.zeros_like(b)
     r = np.zeros_like(b) + b 
     p = np.zeros_like(b) + b 
@@ -410,7 +423,7 @@ def lax_jax_conjugate_gradients(Avp, b, nsteps):
         betta = new_rdotr / rdotr
         p = r + betta * p
         rdotr = new_rdotr
-        new_step = jax.lax.cond(rdotr < residual_tol, lambda s: s + nsteps, lambda s: s +1, v['step'])
+        new_step = jax.lax.cond(rdotr < residual_tol, lambda s: s + nsteps, lambda s: s+1, v['step'])
         return {'step': new_step, 'p': p, 'r': r, 'x': x}
 
     init = {'step': 0, 'p': p, 'r': r, 'x': x}
@@ -421,23 +434,14 @@ def natural_grad(p_params, p_grads, sample):
     obs = sample[0]
     f = lambda w: tree_mean(jax.vmap(p_frwd, (None, 0))(w, obs))
     rho = D_KL_Gauss
-    mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda) 
     flat_grads, unflatten_fcn = jax.flatten_util.ravel_pytree(p_grads)
+
+    # setup flat + damp mvp 
+    mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda) 
     flatten = lambda x: jax.flatten_util.ravel_pytree(x)[0]
     flat_mvp = lambda v: flatten(mvp(unflatten_fcn(v)))
 
-    # step_dir, _ = jax.scipy.sparse.linalg.cg(flat_mvp, flat_neg_grads, maxiter=cg_iters, tol=1e-10)
-    step_dir = lax_jax_conjugate_gradients(flat_mvp, -flat_grads, 10)
-    
-    # # compute optimal step (my way -- correct per-layer alpha?) 
-    # vec = lambda x: x.flatten()[:, None]
-    # # sometimes matMul is negative which when + np.sqrt results in NaN
-    # safe_mat_mul_denom = lambda x, Hx: np.maximum(vec(x).T @ vec(Hx), 1e-8).flatten()
-    # mat_mul = lambda x, Hx: np.sqrt(2 * delta / safe_mat_mul_denom(x, Hx))
-    # alpha = jax.tree_multimap(mat_mul, p_grads, p_ngrad)
-
-    # flat_step_dir, unflatten_fcn = jax.flatten_util.ravel_pytree(step_dir)
-    # flat_step_dir_mvp, _ = jax.flatten_util.ravel_pytree(mvp(step_dir))
+    step_dir = conjugate_gradients(flat_mvp, -flat_grads, 10)
     
     shs = .5 * (step_dir * flat_mvp(step_dir)).sum()
     lm = np.sqrt(shs / 1e-2)
@@ -448,12 +452,11 @@ def natural_grad(p_params, p_grads, sample):
     fullstep = unflatten_fcn(fullstep)
     expected_improve_rate = neggdotstepdir / lm 
 
-    return None, None, None, None, None, (fullstep, expected_improve_rate, lm, flat_grads)
+    return fullstep, expected_improve_rate, lm, flat_grads
 
+@jax.jit
 def batch_natural_grad(p_params, batch):
-    (loss, info), p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch)) ## VERY important to mean FIRST
-    # out = jax.vmap(partial(natural_grad, p_params, p_grads))(batch)
-    # out = tree_mean(out)
+    p_grads = tree_mean(jax.vmap(policy_grad, (None, 0))(p_params, batch)) ## VERY important to avg grads *FIRST*
     out = natural_grad(p_params, p_grads, batch)
     return out
 
@@ -469,27 +472,6 @@ writer = SummaryWriter(comment=f'trpo_{env_name}_seed={seed}_nrollout={n_step_ro
 p_step = 0 
 v_step = 0 
 
-# #%%
-# rng, subkey = jax.random.split(rng, 2) 
-# rollout = worker.rollout(p_params, v_params, subkey)
-
-# #%%
-# # train
-# sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-# loss, info, p_ngrad, alpha, p_grads, (fullstep, expected_improve_rate) = batch_natural_grad(p_params, sampled_rollout)
-# loss, expected_improve_rate
-
-# #%%
-# new_p = line_search2(fullstep, expected_improve_rate, p_params, rollout)
-
-#%%
-# import scipy 
-# flat_v_params, unflatten_fcn = jax.flatten_util.ravel_pytree(v_params)
-# loss = lambda p: batch_critic_loss(unflatten_fcn(p), rollout).astype(np.double)
-# loss_grad_fcn = lambda p: jax.tree_map(lambda x: onp.array(x).astype(onp.double), jax.value_and_grad(loss)(p))
-# flat_vp_params, _, _ = scipy.optimize.fmin_l_bfgs_b(loss_grad_fcn, onp.array(flat_v_params).astype(onp.double), maxiter=25)
-# v_params = unflatten_fcn(flat_vp_params)
-
 #%%
 from tqdm import tqdm 
 # from tqdm.notebook import tqdm 
@@ -500,55 +482,20 @@ while p_step < max_n_steps:
     rollout, mean_reward = worker.rollout(p_params, v_params, subkey)
     writer.add_scalar('eval/total_reward', mean_reward, p_step)
 
-    # train
+    # p update 
     sampled_rollout = sample_rollout(rollout, 0.1) # natural grad on 10% of data
-    # loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
-    # p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
-
-    _, _, _, _, _, (fullstep, expected_improve_rate, lm, flat_grads) = batch_natural_grad(p_params, sampled_rollout)
+    fullstep, expected_improve_rate, lm, flat_grads = batch_natural_grad(p_params, sampled_rollout)
     print("lagrange multiplier:", lm.item(), "grad_norm:", np.linalg.norm(flat_grads).item())
-
-    p_params = line_search2(fullstep, expected_improve_rate, p_params, rollout)
-
-    # writer.add_scalar('info/ploss', loss.item(), p_step)
-    # for k in info.keys(): 
-    #     writer.add_scalar(f'info/{k}', info[k].item(), p_step)
+    p_params = line_search_legit(fullstep, expected_improve_rate, p_params, rollout)
 
     p_step += 1
     pbar.update(1)
 
     # v update 
     flat_v_params, unflatten_fcn = jax.flatten_util.ravel_pytree(v_params)
-    v_loss_fcn = lambda p: batch_critic_loss(unflatten_fcn(p), rollout).astype(np.double)
-    v_loss_grad_fcn = lambda p: jax.tree_map(lambda x: onp.array(x).astype(onp.double), jax.value_and_grad(v_loss_fcn)(p))
+    flat_v_loss = lambda p: batch_critic_loss(unflatten_fcn(p), rollout)
+    # scipy fcn requires onp array double outputs
+    make_onp_double_tree = lambda x: jax.tree_map(onp.array(x).astype(onp.double), x)
+    v_loss_grad_fcn = lambda p: make_onp_double_tree(jax.value_and_grad(flat_v_loss)(p))
     flat_vp_params, _, _ = scipy.optimize.fmin_l_bfgs_b(v_loss_grad_fcn, onp.array(flat_v_params).astype(onp.double), maxiter=25)
     v_params = unflatten_fcn(flat_vp_params)
-
-    # # v_func
-    # for _ in range(n_v_iters):
-    #     loss, v_params, v_opt_state = critic_step(v_params, v_opt_state, rollout)
-    #     writer.add_scalar('info/vloss', loss.item(), v_step)
-    #     v_step += 1
-
-    # # metrics 
-    # for i, g in enumerate(jax.tree_leaves(p_params)): 
-    #     name = 'b' if len(g.shape) == 1 else 'w'
-    #     writer.add_histogram(f'{name}_{i}_params', onp.array(g), p_step)
-    
-    # for i, g in enumerate(jax.tree_leaves(p_grads)): 
-    #     name = 'b' if len(g.shape) == 1 else 'w'
-    #     writer.add_histogram(f'{name}_{i}_grad', onp.array(g), p_step)
-    
-    # for i, g in enumerate(jax.tree_leaves(p_ngrad)): 
-    #     name = 'b' if len(g.shape) == 1 else 'w'
-    #     writer.add_histogram(f'{name}_{i}_ngrad', onp.array(g), p_step)
-    
-    # for i, g in enumerate(jax.tree_leaves(alpha)): 
-    #     writer.add_scalar(f'alpha/{i}', g.item(), p_step)
-
-    # rng, subkey = jax.random.split(rng, 2)
-    # r = eval(p_params, env, subkey)
-    # writer.add_scalar('eval/total_reward', mean_reward, p_step)
-
-# except: 
-#     print('err!')
