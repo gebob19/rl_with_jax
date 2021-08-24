@@ -237,10 +237,6 @@ for (tw, tb), (jw, jb) in zip(vp_v, jax_v):
     print(np.mean(np.abs(tb.numpy() - jb.T)))
 
 # %%
-flat_neg_jax_grads, unravel_fcn = jax.flatten_util.ravel_pytree(neg_jax_grads)
-flat_neg_jax_grads.shape
-
-# %%
 def conjugate_gradients(Avp, b, nsteps, residual_tol=1e-10):
     x = torch.zeros(b.size())
     r = b.clone()
@@ -264,9 +260,9 @@ stepdir.shape
 
 # %%
 def jax_conjugate_gradients(Avp, b, nsteps, residual_tol=1e-10):
-    x = np.zeros(b.size())
-    r = np.copy(b)
-    p = np.copy(b)
+    x = np.zeros_like(b)
+    r = np.zeros_like(b) + b 
+    p = np.zeros_like(b) + b 
     rdotr = np.dot(r, r)
     for i in range(nsteps):
         _Avp = Avp(p)
@@ -281,6 +277,63 @@ def jax_conjugate_gradients(Avp, b, nsteps, residual_tol=1e-10):
             break
     return x
 
+def lax_jax_conjugate_gradients(Avp, b, nsteps):
+    x = np.zeros_like(b)
+    r = np.zeros_like(b) + b 
+    p = np.zeros_like(b) + b 
+    residual_tol = 1e-10
+
+    cond = lambda v: v['step'] < nsteps
+    def body(v):
+        p, r, x = v['p'], v['r'], v['x']
+        rdotr = np.dot(r, r)
+        _Avp = Avp(p)
+        alpha = rdotr / np.dot(p, _Avp)
+        x += alpha * p
+        r -= alpha * _Avp
+        new_rdotr = np.dot(r, r)
+        betta = new_rdotr / rdotr
+        p = r + betta * p
+        rdotr = new_rdotr
+        new_step = jax.lax.cond(rdotr < residual_tol, lambda s: s + nsteps, lambda s: s +1, v['step'])
+        return {'step': new_step, 'p': p, 'r': r, 'x': x}
+
+    init = {'step': 0, 'p': p, 'r': r, 'x': x}
+    x = jax.lax.while_loop(cond, body, init)['x']
+    return x
+
+mvp = lambda v: pullback_mvp(f, rho, p_params, v)
+neg_grads = jax.tree_map(lambda x: -1 * x, jax_grads)
+flat_grads, unflatten_fcn = jax.flatten_util.ravel_pytree(jax_grads)
+flat_mvp = lambda v: jax.flatten_util.ravel_pytree(mvp(unflatten_fcn(v)))[0]
+stepdir_jax = lax_jax_conjugate_gradients(flat_mvp, -flat_grads, 10)
+stepdir_jax.shape
+
+# %%
+np.abs(stepdir_jax - stepdir.numpy()).mean() # 0.00201443
+
+# %%
+shs = 0.5 * (stepdir * Fvp(stepdir)).sum(0, keepdim=True)
+lm = torch.sqrt(shs / 1e-2)
+fullstep = stepdir / lm[0]
+neggdotstepdir = (-loss_grad * stepdir).sum(0, keepdim=True)
+expected_improve_rate = neggdotstepdir / lm[0]
+
+lm, expected_improve_rate
+
+# %%
+shs_j = .5 * (stepdir_jax * flat_mvp(stepdir_jax)).sum()
+lm = np.sqrt(shs_j / 1e-2)
+fullstep = stepdir_jax / lm
+
+neggdotstepdir = (-flat_grads * stepdir_jax).sum()
+
+fullstep = unflatten_fcn(fullstep)
+expected_improve_rate = neggdotstepdir / lm 
+
+lm, expected_improve_rate
+
+# %%
 f = lambda w: p_frwd(w, n_obs)
 rho = D_KL_Gauss
 neg_jax_grads = jax.tree_map(lambda x: -1 * x, jax_grads)
@@ -288,10 +341,8 @@ mvp = lambda v: pullback_mvp(f, rho, p_params, v)
 p_ngrad, _ = jax.scipy.sparse.linalg.cg(mvp,
             neg_jax_grads, maxiter=10, tol=1e-10)
 flat_ngrad, _ = jax.flatten_util.ravel_pytree(p_ngrad)
-flat_ngrad.shape
 
-# %%
-np.abs(flat_ngrad - stepdir.numpy()).max()
+np.abs(flat_ngrad - stepdir.numpy()).mean() # 475711.62
 
 # %%
 

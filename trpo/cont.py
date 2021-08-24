@@ -258,6 +258,8 @@ class Worker:
                 self.epi_reward = 0 
 
         print(f'mean_reward = {onp.mean(self.epi_rewards)}')
+        self.epi_rewards = []
+        
         # update rollout contents 
         rollout = self.buffer.contents()
         advantages, v_target = compute_advantage_targets(v_params, rollout)
@@ -432,20 +434,61 @@ def tree_mvp_dampen(mvp, lmbda=0.1):
     damp_mvp = lambda v: jax.tree_multimap(dampen_fcn, mvp(v), v)
     return damp_mvp
 
-@jax.jit
-def natural_grad(p_params, sample):
+def jax_conjugate_gradients(Avp, b, nsteps, residual_tol=1e-10):
+    x = np.zeros_like(b)
+    r = np.zeros_like(b) + b 
+    p = np.zeros_like(b) + b 
+    rdotr = np.dot(r, r)
+    for i in range(nsteps):
+        _Avp = Avp(p)
+        alpha = rdotr / np.dot(p, _Avp)
+        x += alpha * p
+        r -= alpha * _Avp
+        new_rdotr = np.dot(r, r)
+        betta = new_rdotr / rdotr
+        p = r + betta * p
+        rdotr = new_rdotr
+        
+        if rdotr < residual_tol:
+            break
+    return x
+
+def lax_jax_conjugate_gradients(Avp, b, nsteps):
+    x = np.zeros_like(b)
+    r = np.zeros_like(b) + b 
+    p = np.zeros_like(b) + b 
+    residual_tol=1e-10
+
+    cond = lambda v: v['step'] < nsteps
+    def body(v):
+        p, r, x = v['p'], v['r'], v['x']
+        rdotr = np.dot(r, r)
+        _Avp = Avp(p)
+        alpha = rdotr / np.dot(p, _Avp)
+        x += alpha * p
+        r -= alpha * _Avp
+        new_rdotr = np.dot(r, r)
+        betta = new_rdotr / rdotr
+        p = r + betta * p
+        rdotr = new_rdotr
+        new_step = jax.lax.cond(rdotr < residual_tol, lambda s: s + nsteps, lambda s: s +1, v['step'])
+        return {'step': new_step, 'p': p, 'r': r, 'x': x}
+
+    init = {'step': 0, 'p': p, 'r': r, 'x': x}
+    x = jax.lax.while_loop(cond, body, init)['x']
+    return x
+
+def natural_grad(p_params, p_grads, sample):
     obs = sample[0]
-    (loss, info), p_grads = policy_loss_grad(p_params, sample)
     f = lambda w: p_frwd(w, obs)
     rho = D_KL_Gauss
-
     mvp = tree_mvp_dampen(lambda v: pullback_mvp(f, rho, p_params, v), damp_lambda) 
-    neg_grads = jax.tree_map(lambda x: -1 * x, p_grads)
-    flat_neg_grads, unflatten_fcn = jax.flatten_util.ravel_pytree(neg_grads)
-    flat_mvp = lambda v: jax.flatten_util.ravel_pytree(mvp(unflatten_fcn(v)))[0]
+    flat_grads, unflatten_fcn = jax.flatten_util.ravel_pytree(p_grads)
+    flatten = lambda x: jax.flatten_util.ravel_pytree(x)[0]
+    flat_mvp = lambda v: flatten(mvp(unflatten_fcn(v)))
 
-    ## dont do this per grad -- r.T r will be different per layer :?
-    step_dir, _ = jax.scipy.sparse.linalg.cg(flat_mvp, flat_neg_grads, maxiter=cg_iters, tol=1e-10)
+    # step_dir, _ = jax.scipy.sparse.linalg.cg(flat_mvp, flat_neg_grads, maxiter=cg_iters, tol=1e-10)
+    step_dir = lax_jax_conjugate_gradients(flat_mvp, -flat_grads, 10)
     
     # # compute optimal step (my way -- correct per-layer alpha?) 
     # vec = lambda x: x.flatten()[:, None]
@@ -461,18 +504,16 @@ def natural_grad(p_params, sample):
     lm = np.sqrt(shs / 1e-2)
     fullstep = step_dir / lm
 
-    flat_grads, _ = jax.flatten_util.ravel_pytree(p_grads)
     neggdotstepdir = (-flat_grads * step_dir).sum()
 
     fullstep = unflatten_fcn(fullstep)
     expected_improve_rate = neggdotstepdir / lm 
 
-    return loss, info, None, None, None, (fullstep, expected_improve_rate, lm, flat_grads)
+    return None, None, None, None, None, (fullstep, expected_improve_rate, lm, flat_grads)
 
 def batch_natural_grad(p_params, batch):
-    out = jax.vmap(partial(natural_grad, p_params))(batch)
-    loss, info,_,_,_, (fullstep, expected_improve_rate, lm, flat_grads) = out 
-    print('lms:', lm)
+    (loss, info), p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch))
+    out = jax.vmap(partial(natural_grad, p_params, p_grads))(batch)
     out = tree_mean(out)
     return out
 
@@ -523,14 +564,14 @@ while p_step < max_n_steps:
     # loss, info, p_ngrad, alpha, p_grads = batch_natural_grad(p_params, sampled_rollout)
     # p_params = line_search(alpha, loss, p_params, p_ngrad, rollout, n_search_iters, delta)
 
-    loss, info, _, _, _, (fullstep, expected_improve_rate, lm, flat_grads) = batch_natural_grad(p_params, sampled_rollout)
+    _, _, _, _, _, (fullstep, expected_improve_rate, lm, flat_grads) = batch_natural_grad(p_params, sampled_rollout)
     print("lagrange multiplier:", lm.item(), "grad_norm:", np.linalg.norm(flat_grads).item())
 
     p_params = line_search2(fullstep, expected_improve_rate, p_params, rollout)
 
-    writer.add_scalar('info/ploss', loss.item(), p_step)
-    for k in info.keys(): 
-        writer.add_scalar(f'info/{k}', info[k].item(), p_step)
+    # writer.add_scalar('info/ploss', loss.item(), p_step)
+    # for k in info.keys(): 
+    #     writer.add_scalar(f'info/{k}', info[k].item(), p_step)
 
     p_step += 1
     pbar.update(1)
