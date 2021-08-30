@@ -13,13 +13,14 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
-env_name = 'Pendulum-v0' ## this env doesn't converge with TRPO (tried other impls too)
+env_name = 'Pendulum-v0' 
 env = gym.make(env_name)
 
 n_actions = env.action_space.shape[0]
 obs_dim = env.observation_space.shape[0]
 
 #%%
+# https://github.com/ikostrikov/pytorch-trpo
 import torch
 import torch.autograd as autograd
 import torch.nn as nn
