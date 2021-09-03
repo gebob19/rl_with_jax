@@ -138,11 +138,13 @@ seed = onp.random.randint(1e5)
 epochs = 500
 eval_every = 1
 max_n_steps = 100 # env._max_episode_steps
+
 ## PPO
 eps = 0.2
 gamma = 0.99 
 lmbda = 0.95
 lr = 1e-3
+
 ## MAML 
 task_batch_size = 40
 train_n_traj = 20
@@ -204,7 +206,7 @@ class Worker:
 
     def maml_inner(self, p_params, rng, n_traj, alpha):
         subkeys = jax.random.split(rng, n_traj) 
-        trajectories = []
+        trajectories = [] ## sample K trajectories
         for i in range(n_traj):
             traj = self.rollout(p_params, subkeys[i]) 
             traj['r'] = discount_cumsum(traj['r'], discount=gamma)
@@ -215,11 +217,11 @@ class Worker:
             trajectories[i]['adv'] = compute_advantage(W, trajectories[i])
         
         gradients = []
-        for traj in trajectories:
+        for traj in trajectories: ## compute gradients 
             _, grad = self.rf_grad(p_params, traj['obs'], traj['a'], traj['adv'])
             gradients.append(grad)
         grads = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
-        inner_params_p = sgd_step(p_params, grads, alpha)
+        inner_params_p = sgd_step(p_params, grads, alpha) ## take a step 
 
         return inner_params_p, W
 
@@ -319,6 +321,7 @@ from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter(comment=f'maml_{n_tasks}task_test_seed={seed}')
 
 #%%
+
 step_count = 0 
 for e in tqdm(range(1, epochs+1)):
     # training 
