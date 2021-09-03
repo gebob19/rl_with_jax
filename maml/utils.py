@@ -5,7 +5,7 @@ from functools import partial
 import haiku as hk
 import optax
 
-def init_policy_fcn(type, env, rng, nhidden=64):
+def init_policy_fcn(type, env, rng, nhidden=64, jit=True):
 
     if type == 'continuous':
         n_actions = env.action_space.shape[0]
@@ -39,7 +39,9 @@ def init_policy_fcn(type, env, rng, nhidden=64):
 
     policy_fcn = hk.transform(_policy_fcn)
     policy_fcn = hk.without_apply_rng(policy_fcn)
-    p_frwd = jax.jit(policy_fcn.apply)
+    p_frwd = policy_fcn.apply
+    if jit: 
+        p_frwd = jax.jit(p_frwd)
 
     obs = np.zeros(env.observation_space.shape)  # dummy input 
     p_params = policy_fcn.init(rng, obs) 
@@ -155,8 +157,8 @@ def discount_cumsum(l, discount):
 def tree_shape(tree): 
     for l in jax.tree_leaves(tree): print(l.shape)
 
-tree_mean = jax.jit(lambda tree: jax.tree_map(lambda x: x.mean(0), tree))
-tree_sum = jax.jit(lambda tree: jax.tree_map(lambda x: x.sum(0), tree))
+tree_mean = lambda tree: jax.tree_map(lambda x: x.mean(0), tree)
+tree_sum = lambda tree: jax.tree_map(lambda x: x.sum(0), tree)
 
 def jit_vmap_tree_op(jit_tree_op, f, *vmap_args):
     return lambda *args: jit_tree_op(jax.vmap(f, *vmap_args)(*args))

@@ -1,6 +1,6 @@
-# #%%
-# %load_ext autoreload
-# %autoreload 2
+#%%
+%load_ext autoreload
+%autoreload 2
 
 import jax
 import jax.numpy as np 
@@ -91,7 +91,6 @@ def rollout(env, p_params, rng):
 
 #%%
 # inner optim 
-@jax.jit
 def _reinforce_loss(p_params, obs, a, adv):
     mu, std = p_frwd(p_params, obs)
     log_prob = gaussian_log_prob(a, mu, std)
@@ -101,7 +100,6 @@ def _reinforce_loss(p_params, obs, a, adv):
 reinforce_loss = sum_vmap_jit(_reinforce_loss, (None, 0, 0, 0))
 reinforce_loss_grad = jax.jit(jax.value_and_grad(reinforce_loss))
 
-@jax.jit
 def _ppo_loss(p_params, obs, a, adv, old_log_prob):
     ## policy losses 
     mu, std = p_frwd(p_params, obs)
@@ -125,12 +123,10 @@ def _ppo_loss(p_params, obs, a, adv, old_log_prob):
 
 ppo_loss = mean_vmap_jit(_ppo_loss, (None, 0, 0, 0, 0))
 
-@jax.jit
 def sgd_step_int(params, grads, alpha):
     sgd_update = lambda param, grad: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads)
 
-@jax.jit
 def sgd_step_tree(params, grads, alphas):
     sgd_update = lambda param, grad, alpha: param - alpha * grad
     return jax.tree_multimap(sgd_update, params, grads, alphas)
@@ -154,19 +150,95 @@ task_batch_size = 40
 train_n_traj = 20
 eval_n_traj = 40
 alpha = 0.1
-damp_lambda = 0.01
 
 rng = jax.random.PRNGKey(seed)
-p_frwd, p_params = init_policy_fcn('continuous', env, rng)
+p_frwd, p_params = init_policy_fcn('continuous', env, rng, jit=False)
 
 p_update_fcn, p_opt_state = optim_update_fcn(optax.adam(lr), p_params)
 
 #%%
-task = env.sample_tasks(1)[0]
-env.reset_task(task)
+def cont_policy(p_frwd, params, obs, rng, clip_range, greedy):
+    mu, std = p_frwd(params, obs)
+    a = jax.lax.cond(greedy, lambda _: mu, lambda _: gaussian_sample(mu, std, rng), None)
+    a = np.clip(a, *clip_range) # [low, high]
+    log_prob = gaussian_log_prob(a, mu, std)
+    return a, log_prob
+
+tree_sum = lambda tree: jax.tree_map(lambda x: x.sum(0), tree)
+tree_mean = lambda tree: jax.tree_map(lambda x: x.mean(0), tree)
+
+@ray.remote
+class Worker:
+    def __init__(self, task):
+        self.task = task 
+        self.p_frwd = p_frwd
+        self.buffer = Cont_Vector_Buffer(n_actions, obs_dim, max_n_steps)
+        self.env = Navigation2DEnv(max_n_steps=200) # maml debug env 
+        self.env.reset_task(task)
+        self.obs = self.env.reset()
+        self.policy = jax.jit(cont_policy, static_argnums=(0,))
+        
+        rf_loss = lambda *args: tree_sum(jax.vmap(_reinforce_loss, (None, 0, 0, 0))(*args))
+        self.rf_grad = jax.jit(jax.value_and_grad(rf_loss))
+
+        self.ppo_loss = jax.jit(lambda *args: tree_mean(jax.vmap(_ppo_loss, (None, 0, 0, 0, 0))(*args)))
+        self.maml_grad = jax.value_and_grad(self.maml_outer, has_aux=True)
+        
+    def rollout(self, p_params, rng):
+        self.buffer.clear()
+        obs = self.env.reset()
+        for _ in range(max_n_steps): 
+            rng, subkey = jax.random.split(rng, 2)
+            a, log_prob = self.policy(p_frwd, p_params, obs, subkey, clip_range, False)
+
+            a = jax.lax.stop_gradient(a)
+            log_prob = jax.lax.stop_gradient(log_prob)
+            a = onp.array(a)
+
+            obs2, r, done, _ = self.env.step(a)
+            self.buffer.push((obs, a, r, obs2, done, log_prob))
+            
+            obs = obs2
+            if done: break 
+
+        trajectory = self.buffer.contents()
+        return trajectory 
+
+    def maml_inner(self, p_params, rng, n_traj, alpha):
+        subkeys = jax.random.split(rng, n_traj) 
+        trajectories = []
+        for i in range(n_traj):
+            traj = self.rollout(p_params, subkeys[i]) 
+            traj['r'] = discount_cumsum(traj['r'], discount=gamma)
+            trajectories.append(traj)
+
+        W = v_fit(trajectories)[0]
+        for i in range(n_traj): 
+            trajectories[i]['adv'] = compute_advantage(W, trajectories[i])
+        
+        gradients = []
+        for traj in trajectories:
+            _, grad = self.rf_grad(p_params, traj['obs'], traj['a'], traj['adv'])
+            gradients.append(grad)
+        grads = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
+        inner_params_p = sgd_step(p_params, grads, alpha)
+
+        return inner_params_p, W
+
+    def maml_outer(self, p_params, rng):
+        subkeys = jax.random.split(rng, 3)
+        inner_p_params, W = self.maml_inner(p_params, subkeys[0], train_n_traj, alpha)
+
+        traj = self.rollout(inner_p_params, subkeys[1]) 
+        traj['adv'] = compute_advantage(W, traj)
+        loss, info = self.ppo_loss(inner_p_params, traj['obs'], traj['a'], traj['adv'], traj['log_prob'])
+        return loss, (info, traj)
+
+    def compute_task_gradients(self, p_params, rng):
+        (loss, _), grads = self.maml_grad(p_params, rng)
+        return loss, grads
 
 #%%
-@jax.jit
 def compute_advantage(W, traj):
     # linear fcn predict
     v_obs = v_features(traj['obs']) @ W
@@ -175,36 +247,6 @@ def compute_advantage(W, traj):
     # normalize 
     adv = (adv - adv.mean()) / (adv.std() + 1e-8)
     return adv.squeeze()
-
-def maml_inner(p_params, env, rng, n_traj, alpha):
-    subkeys = jax.random.split(rng, n_traj) 
-    trajectories = []
-    for i in range(n_traj):
-        traj = rollout(env, p_params, subkeys[i]) 
-        traj['r'] = discount_cumsum(traj['r'], discount=gamma)
-        trajectories.append(traj)
-
-    W = v_fit(trajectories)[0]
-    for i in range(len(trajectories)): 
-        trajectories[i]['adv'] = compute_advantage(W, trajectories[i])
-    
-    gradients = []
-    for traj in trajectories:
-        _, grad = reinforce_loss_grad(p_params, traj['obs'], traj['a'], traj['adv'])
-        gradients.append(grad)
-    grads = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
-    inner_params_p = sgd_step(p_params, grads, alpha)
-
-    return inner_params_p, W
-
-def maml_outer(p_params, env, rng):
-    subkeys = jax.random.split(rng, 3)
-    inner_p_params, W = maml_inner(p_params, env, subkeys[0], train_n_traj, alpha)
-
-    traj = rollout(env, inner_p_params, subkeys[1]) 
-    traj['adv'] = compute_advantage(W, traj)
-    loss, info = ppo_loss(inner_p_params, traj['obs'], traj['a'], traj['adv'], traj['log_prob'])
-    return loss, (info, traj)
 
 def maml_eval(env, p_params, rng, n_steps=1):
     rewards = []
@@ -217,7 +259,7 @@ def maml_eval(env, p_params, rng, n_steps=1):
     for _ in range(n_steps):
         rng, *subkeys = jax.random.split(rng, 3)
         
-        inner_p_params, _ = maml_inner(p_params, env, subkeys[0], train_n_traj, eval_alpha)
+        inner_p_params, _ = maml_inner(p_params, env, subkeys[0], eval_n_traj, eval_alpha)
         r = eval(p_frwd, policy, inner_p_params, env, subkeys[1], clip_range, True)
 
         rewards.append(r)
@@ -265,19 +307,16 @@ for e in tqdm(range(1, epochs+1)):
     # training 
     # tasks = env.sample_tasks(task_batch_size)
 
-    gradients = []
-    mean_loss = 0
-    for task_i, task in enumerate(tqdm(tasks)): 
-        env.reset_task(task)
-        rng, subkey = jax.random.split(rng, 2)
-        (loss, (info, traj)), grads = maml_grad(p_params, env, rng)
-        
-        gradients.append(grads)
-        mean_loss += loss 
-        step_count += 1    
+    # multiprocessing rollout 
+    n_envs = len(tasks)
+    workers = [Worker.remote(tasks[i]) for i in range(n_envs)]
+    rng, *subkeys = jax.random.split(rng, 1+n_envs) 
+    output = ray.get([workers[i].compute_task_gradients.remote(p_params, subkeys[i]) for i in range(n_envs)])
 
-    mean_loss /= len(tasks)
-    writer.add_scalar(f'loss/mean_task_loss', mean_loss.item(), step_count)
+    loss = onp.mean([output[i][0] for i in range(len(output))])
+    gradients = [output[i][1] for i in range(len(output))]
+
+    writer.add_scalar(f'loss/mean_task_loss', loss, step_count)
 
     # update 
     gradients = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)

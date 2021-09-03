@@ -18,7 +18,7 @@ class Navigation2DEnv(gym.Env):
         (https://arxiv.org/abs/1703.03400)
     """
     def __init__(self, task={}, low=-0.5, high=0.5, max_n_steps=100):
-        super(Navigation2DEnv, self).__init__()
+        super().__init__()
         self.low = low
         self.high = high
         self.max_n_steps = max_n_steps

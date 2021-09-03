@@ -19,6 +19,7 @@ from jax.config import config
 config.update("jax_enable_x64", True) 
 config.update("jax_debug_nans", True) # break on nans
 
+
 #%%
 from utils import gaussian_log_prob, gaussian_sample
 from utils import cont_policy as policy 
@@ -214,7 +215,7 @@ def maml_eval(env, p_params, rng, n_steps=1):
     for _ in range(n_steps):
         rng, *subkeys = jax.random.split(rng, 3)
         
-        inner_p_params, _ = maml_inner(p_params, env, subkeys[0], train_n_traj, eval_alpha)
+        inner_p_params, _ = maml_inner(p_params, env, subkeys[0], eval_n_traj, eval_alpha)
         r = eval(p_frwd, policy, inner_p_params, env, subkeys[1], clip_range, True)
 
         rewards.append(r)
