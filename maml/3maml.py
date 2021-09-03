@@ -225,7 +225,7 @@ def maml_eval(env, p_params, rng, n_steps=1):
 
 #%%
 env.seed(0)
-n_tasks = 1 
+n_tasks = 2
 task = env.sample_tasks(1)[0] ## only two tasks
 assert n_tasks in [1, 2] 
 if n_tasks == 1: 
@@ -255,6 +255,8 @@ from torch.utils.tensorboard import SummaryWriter
 writer = SummaryWriter(comment=f'maml_{n_tasks}task_test_seed={seed}')
 
 #%%
+maml_grad = jax.value_and_grad(maml_outer, has_aux=True)
+
 step_count = 0 
 for e in tqdm(range(1, epochs+1)):
     # training 
@@ -265,14 +267,14 @@ for e in tqdm(range(1, epochs+1)):
     for task_i, task in enumerate(tqdm(tasks)): 
         env.reset_task(task)
         rng, subkey = jax.random.split(rng, 2)
-        (loss, (info, traj)), grads = jax.value_and_grad(maml_outer, has_aux=True)(p_params, env, rng)
+        (loss, (info, traj)), grads = maml_grad(p_params, env, rng)
         
         gradients.append(grads)
         mean_loss += loss 
-        step_count += 1 
-            
+        step_count += 1    
+
     mean_loss /= len(tasks)
-    writer.add_scalar(f'loss/mean_task_loss', mean_loss, step_count)
+    writer.add_scalar(f'loss/mean_task_loss', mean_loss.item(), step_count)
 
     # update 
     gradients = jax.tree_multimap(lambda *x: np.stack(x).mean(0), *gradients)
@@ -280,13 +282,13 @@ for e in tqdm(range(1, epochs+1)):
 
     # eval 
     if e % eval_every == 0:
-        eval_tasks = tasks
+        eval_tasks = tasks[:n_tasks]
         task_rewards = []
         for task_i, eval_task in enumerate(eval_tasks):
             env.reset_task(eval_task)
 
             rng, subkey = jax.random.split(rng, 2)
-            rewards, infos = maml_eval(env, p_params, subkey, n_steps=3)
+            rewards = maml_eval(env, p_params, subkey, n_steps=3)
             task_rewards.append(rewards)
 
             for step_i, r in enumerate(rewards):
