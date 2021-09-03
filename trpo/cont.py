@@ -257,7 +257,7 @@ n_step_rollout = 25000
 gamma = 0.995
 lmbda = 0.97
 # trpo 
-delta = 0.01
+delta = 1e-2
 damp_lambda = 1e-1
 n_search_iters = 10 
 cg_iters = 10
@@ -441,7 +441,7 @@ def natural_grad(p_params, p_grads, sample):
     step_dir = conjugate_gradients(flat_mvp, -flat_grads, 10)
     
     shs = .5 * (step_dir * flat_mvp(step_dir)).sum()
-    lm = np.sqrt(shs / 1e-2)
+    lm = np.sqrt(shs / delta)
     fullstep = step_dir / lm
 
     neggdotstepdir = (-flat_grads * step_dir).sum()
