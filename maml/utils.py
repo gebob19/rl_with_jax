@@ -157,8 +157,8 @@ def discount_cumsum(l, discount):
 def tree_shape(tree): 
     for l in jax.tree_leaves(tree): print(l.shape)
 
-tree_mean = lambda tree: jax.tree_map(lambda x: x.mean(0), tree)
-tree_sum = lambda tree: jax.tree_map(lambda x: x.sum(0), tree)
+tree_mean = jax.jit(lambda tree: jax.tree_map(lambda x: x.mean(0), tree))
+tree_sum = jax.jit(lambda tree: jax.tree_map(lambda x: x.sum(0), tree))
 
 def jit_vmap_tree_op(jit_tree_op, f, *vmap_args):
     return lambda *args: jit_tree_op(jax.vmap(f, *vmap_args)(*args))
