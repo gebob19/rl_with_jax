@@ -3,7 +3,7 @@ import jax.numpy as np
 import jax 
 from functools import partial
 import haiku as hk
-import distrax
+import optax
 
 def init_policy_fcn(type, env, rng, nhidden=64):
 
@@ -46,13 +46,31 @@ def init_policy_fcn(type, env, rng, nhidden=64):
 
     return p_frwd, p_params
 
+def optim_update_fcn(optim, params):
+    opt_state = optim.init(params)
+    @jax.jit
+    def update_step(params, opt_state, grads):
+        grads, opt_state = optim.update(grads, opt_state)
+        params = optax.apply_updates(params, grads)
+        return params, opt_state
+    return update_step, opt_state
+
+def gaussian_log_prob(x, mean, std):
+    log_std = np.log(std)
+    var = np.power(std, 2)
+    log_density = -np.power(x - mean, 2) / (
+        2 * var) - 0.5 * np.log(2 * np.pi) - log_std
+    return np.sum(log_density)
+
+def gaussian_sample(mean, std, rng):
+    return jax.random.normal(rng) * std + mean 
+
 @partial(jax.jit, static_argnums=(0,))
 def cont_policy(p_frwd, params, obs, rng, clip_range, greedy):
-    mu, sig = p_frwd(params, obs)
-    dist = distrax.MultivariateNormalDiag(mu, sig)
-    a = jax.lax.cond(greedy, lambda _: mu, lambda _: dist.sample(seed=rng), None)
+    mu, std = p_frwd(params, obs)
+    a = jax.lax.cond(greedy, lambda _: mu, lambda _: gaussian_sample(mu, std, rng), None)
     a = np.clip(a, *clip_range) # [low, high]
-    log_prob = dist.log_prob(a)
+    log_prob = gaussian_log_prob(a, mu, std)
     return a, log_prob
 
 @partial(jax.jit, static_argnums=(0,))
@@ -64,12 +82,12 @@ def disc_policy(p_frwd, params, obs, rng, greedy):
     log_prob = dist.log_prob(a)
     return a, log_prob
 
-def eval(p_frwd, policy, params, env, rng, greedy):
+def eval(p_frwd, policy, params, env, rng, clip_range, greedy):
     rewards = 0 
     obs = env.reset()
     while True: 
         rng, subkey = jax.random.split(rng, 2)
-        a = policy(p_frwd, params, obs, subkey, greedy)[0]
+        a = policy(p_frwd, params, obs, subkey, clip_range, greedy)[0]
         a = onp.array(a)
         obs2, r, done, _ = env.step(a)        
         obs = obs2 

@@ -19,6 +19,7 @@ config.update("jax_enable_x64", True)
 config.update("jax_debug_nans", True) # break on nans
 
 #%%
+from utils import normal_log_density, sample_gaussian
 from utils import disc_policy as policy 
 from utils import eval, init_policy_fcn, Disc_Vector_Buffer, discount_cumsum, \
     tree_mean, mean_vmap_jit, sum_vmap_jit
@@ -88,10 +89,6 @@ def _reinforce_loss(p_params, obs, a, adv):
     log_prob = distrax.Categorical(probs=pi).log_prob(a)
     loss = -(log_prob * adv).sum()
     return loss
-
-# def reinforce_loss(p_params, obs, a, adv):
-#     loss = jax.vmap(partial(_reinforce_loss, p_params))(obs, a, adv).sum()
-#     return loss
 
 reinforce_loss = sum_vmap_jit(_reinforce_loss, (None, 0, 0, 0))
 reinforce_loss_grad = jax.jit(jax.value_and_grad(reinforce_loss))
