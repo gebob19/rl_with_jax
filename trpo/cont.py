@@ -381,8 +381,8 @@ def line_search_legit(full_step, expected_improve_rate, p_params, rollout, n_ite
         new_loss = L(new_p_params)
 
         actual_improve = init_loss - new_loss
-        expected_improve = expected_improve_rate * step_frac
-        ratio = actual_improve / expected_improve
+        expected_improve = expected_improve_rate * step_frac # ∇J^T F^-1 ∇J * alpha_i (where alpha_i=sqrt(2*delta / xAx) / 2^i)
+        ratio = actual_improve / expected_improve 
 
         print(f"{i} a/e/r", actual_improve.item(), expected_improve.item(), ratio.item())
 
@@ -438,22 +438,23 @@ def natural_grad(p_params, p_grads, sample):
     flatten = lambda x: jax.flatten_util.ravel_pytree(x)[0]
     flat_mvp = lambda v: flatten(mvp(unflatten_fcn(v)))
 
-    step_dir = conjugate_gradients(flat_mvp, -flat_grads, 10)
+    step_dir = conjugate_gradients(flat_mvp, -flat_grads, 10) # F^-1 ∇J
     
-    shs = .5 * (step_dir * flat_mvp(step_dir)).sum()
-    lm = np.sqrt(shs / delta)
-    fullstep = step_dir / lm
+    shs = .5 * (step_dir * flat_mvp(step_dir)).sum() # (xAx)/2
+    lm = np.sqrt(shs / delta)  # sqrt(xAx / 2*delta)
+    fullstep = step_dir / lm # sqrt(2*delta / xAx) * F^-1 ∇J
 
-    neggdotstepdir = (-flat_grads * step_dir).sum()
+    neggdotstepdir = (-flat_grads * step_dir).sum() # ∇J^T F^-1 ∇J
 
     fullstep = unflatten_fcn(fullstep)
-    expected_improve_rate = neggdotstepdir / lm 
+    # trust region optimization 
+    expected_improve_rate = neggdotstepdir / lm # ∇J^T F^-1 ∇J * sqrt(2*delta / xAx)
 
     return fullstep, expected_improve_rate, lm, flat_grads
 
 @jax.jit
 def batch_natural_grad(p_params, batch):
-    (loss, info), p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch)) ## VERY important to mean FIRST
+    _, p_grads = tree_mean(jax.vmap(policy_loss_grad, (None, 0))(p_params, batch)) ## VERY important to mean FIRST
     out = natural_grad(p_params, p_grads, batch)
     return out
 

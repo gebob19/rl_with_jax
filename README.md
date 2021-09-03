@@ -12,3 +12,4 @@ Single-file implementations focused on clarity rather than proper code standards
 | DDPG      | ddpg/      |                  | ddpg_jax.py        |            | *TD3_DDPG* = ddpg_td3.py                                             |
 | A2C       | a2c/       | a2c.py           |                    | *_multi.py |                                                                    |
 
+For a better understanding of TRPO optimization check out [Natural Gradient Descent without the Tears](https://gebob19.github.io/natural-gradient/)

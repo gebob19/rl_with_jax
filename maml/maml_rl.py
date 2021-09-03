@@ -1,4 +1,6 @@
 #%%
+
+
 import jax
 import jax.numpy as np 
 import numpy as onp 
@@ -10,6 +12,8 @@ from env import Navigation2DEnv
 # from jax_env import Navigation2DEnvJAX
 import cloudpickle
 import pathlib 
+
+from utils import normal_log_density, sample_gaussian
 
 from jax.config import config
 config.update("jax_enable_x64", True) 
