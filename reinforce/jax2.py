@@ -1,3 +1,5 @@
+## different implementation version of batch REINFORCE (still works and is 2x faster)
+
 #%%
 import jax
 import jax.numpy as np 
@@ -122,29 +124,25 @@ step_count = 0
 epi_i = 0 
 
 pbar = tqdm(total=max_n_steps)
-gradients = []
 loss_grad_fcn = jax.jit(jax.value_and_grad(batch_reinforce_loss))
 
 while step_count < max_n_steps: 
-    rng, subkey = jax.random.split(rng, 2) 
-    obs, a, r = rollout(p_params, subkey)
-    writer.add_scalar('rollout/reward', r.sum().item(), epi_i)
-    r = reward2go(r)
-    loss, grad = loss_grad_fcn(p_params, (obs, a, r))
 
+    trajs = []
+    for _ in range(batch_size):
+        rng, subkey = jax.random.split(rng, 2) 
+        obs, a, r = rollout(p_params, subkey)
+        writer.add_scalar('rollout/reward', r.sum().item(), epi_i)
+        r = reward2go(r)
+        trajs.append((obs, a, r))
+        epi_i += 1 
+    
+    trajs = jax.tree_multimap(lambda *x: np.concatenate(x, 0), *trajs)
+    loss, grads = loss_grad_fcn(p_params, trajs)
+    p_params, p_opt_state = update_step(p_params, grads, p_opt_state)
+    
     writer.add_scalar('loss/loss', loss.item(), step_count)
-    gradients.append(grad)
-
-    epi_i += 1
-    if epi_i % batch_size == 0:
-        grads = jax.tree_multimap(lambda *x: np.stack(x).sum(0), *gradients)
-        p_params, p_opt_state = update_step(p_params, grads, p_opt_state)
-
-        for i, g in enumerate(jax.tree_leaves(grads)): 
-            name = 'b' if len(g.shape) == 1 else 'w'
-            writer.add_histogram(f'{name}_{i}_grad', onp.array(g), epi_i)
-
-        gradients = []
+    step_count += 1 
 
 # %%
 # %%

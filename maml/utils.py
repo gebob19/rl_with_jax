@@ -115,9 +115,10 @@ class Cont_Vector_Buffer:
 
     def contents(self):
         contents = onp.split(self.buffer[:self.i], self.splits, axis=-1)
-        d = {}
-        for n, c in zip(self.split_names, contents): d[n] = c
-        return d 
+        return contents
+        # d = {}
+        # for n, c in zip(self.split_names, contents): d[n] = c
+        # return d 
 
     def clear(self):
         self.i = 0 
