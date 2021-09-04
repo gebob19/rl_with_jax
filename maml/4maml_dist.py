@@ -29,7 +29,8 @@ import pathlib
 import haiku as hk
 from tqdm import tqdm 
 import ray 
-ray.init()
+
+ray.init(log_to_driver=False)
 
 from jax.config import config
 config.update("jax_enable_x64", True) 
@@ -188,6 +189,21 @@ def reinforce_step(traj, p_params, alpha):
     inner_params_p = sgd_step_int(p_params, grads, alpha)
     return inner_params_p
 
+def maml_inner_step(p_params, env, rng, n_traj, alpha):
+    # rollout + post process (train)
+    train_trajectories = n_rollouts(p_params, env, rng, n_traj)
+    featmat = np.concatenate([v_features(traj[0]) for traj in train_trajectories])
+    train_trajectories = jax.tree_multimap(lambda *x: np.concatenate(x, 0), *train_trajectories)
+    (obs, a, r, _, _, log_prob) = train_trajectories
+    W = v_fit(featmat, r)[0]
+    adv = compute_advantage(W, obs, r)
+    train_trajectories = (obs, a, adv, log_prob)
+    r0 = r # metrics
+    
+    # compute gradient + step
+    inner_params_p = reinforce_step(train_trajectories[:-1], p_params, alpha)
+    return inner_params_p, r0
+
 def maml_inner(p_params, env, rng, alpha):
     # rollout + post process (train)
     train_trajectories = n_rollouts(p_params, env, rng, train_n_traj)
@@ -302,7 +318,7 @@ class Worker:
         adv = self.adv_fcn(Wtest, obs, r)
         test_trajectories = (obs, a, adv, log_prob)
 
-        return (train_trajectories, test_trajectories), (r0, r)
+        return (train_trajectories, test_trajectories), (r0.sum().item(), r.sum().item())
 
     def maml_outter(self, p_params, inner, alpha):
         train_trajectories, test_trajectories = inner
@@ -317,9 +333,29 @@ class Worker:
         grads = self.maml_grad(p_params, inner, alpha)[1]
         return (r0, r1), grads
 
+def maml_eval(env, p_params, rng, n_steps=1):
+    rewards = []
+
+    rng, subkey = jax.random.split(rng, 2)
+    reward_0step = eval(p_frwd, policy, p_params, env, subkey, clip_range, True)
+    rewards.append(reward_0step)
+
+    eval_alpha = alpha
+    for _ in range(n_steps):
+        rng, *subkeys = jax.random.split(rng, 3)
+        
+        inner_p_params, _ = maml_inner_step(p_params, env, subkeys[0], eval_n_traj, eval_alpha)
+        r = eval(p_frwd, policy, inner_p_params, env, subkeys[1], clip_range, True)
+
+        rewards.append(r)
+        eval_alpha = alpha / 2 
+        p_params = inner_p_params
+
+    return rewards
+
 #%%
 env.seed(0)
-n_tasks = 1
+n_tasks = 2
 task = env.sample_tasks(1)[0] ## only two tasks
 assert n_tasks in [1, 2] 
 if n_tasks == 1: 
@@ -361,15 +397,34 @@ for e in tqdm(range(1, epochs+1)):
     r1s = [o[0][1] for o in output]
     grads = [o[1] for o in output]
 
-    for i in range(n_envs):
-        writer.add_scalar(f'task{i}/reward_0step', r0s[i], e)
-        writer.add_scalar(f'task{i}/reward_1step', r1s[i], e)
+    for i in range(n_tasks):
+        writer.add_scalar(f'train_task{i}/reward_0step', r0s[i], e)
+        writer.add_scalar(f'train_task{i}/reward_1step', r1s[i], e)
 
-    writer.add_scalar(f'mean_task/reward_0step', onp.mean(r0s), e)
-    writer.add_scalar(f'mean_task/reward_1step', onp.mean(r1s), e)
+    writer.add_scalar(f'train_mean_task/reward_0step', onp.mean(r0s), e)
+    writer.add_scalar(f'train_mean_task/reward_1step', onp.mean(r1s), e)
 
     grads = jax.tree_multimap(lambda *g: np.stack(g, 0).mean(0), *grads)
     p_params, p_opt_state = p_update_fcn(p_params, p_opt_state, grads)
+
+    if e % eval_every == 0:
+        eval_tasks = tasks[:n_tasks]
+        task_rewards = []
+        for task_i, eval_task in enumerate(eval_tasks):
+            env.reset_task(eval_task)
+
+            rng, subkey = jax.random.split(rng, 2)
+            rewards = maml_eval(env, p_params, subkey, n_steps=3)
+            task_rewards.append(rewards)
+
+            for step_i, r in enumerate(rewards):
+                writer.add_scalar(f'task{task_i}/reward_{step_i}step', r, e)
+
+        mean_rewards=[]
+        for step_i in range(len(task_rewards[0])):
+            mean_r = sum([task_rewards[j][step_i] for j in range(len(task_rewards))]) / 2
+            writer.add_scalar(f'mean_task/reward_{step_i}step', mean_r, e)
+            mean_rewards.append(mean_r)
 
 #%%
 #%%
