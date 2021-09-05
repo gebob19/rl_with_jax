@@ -290,8 +290,8 @@ class Worker:
         for i in range(n_traj):
             traj = self.rollout(p_params, subkeys[i])
             (obs, a, r, obs2, done, log_prob) = traj 
-            r = discount_cumsum(r, discount=gamma)
-            traj = (obs, a, r, obs2, done, log_prob)
+            rolling_r = discount_cumsum(r, discount=gamma)
+            traj = (obs, a, rolling_r, obs2, done, log_prob, r)
             trajectories.append(traj)
         return trajectories
 
@@ -300,11 +300,10 @@ class Worker:
         train_trajectories = self.n_rollouts(p_params, rng, train_n_traj)
         featmat = np.concatenate([v_features(traj[0]) for traj in train_trajectories])
         train_trajectories = jax.tree_multimap(lambda *x: np.concatenate(x, 0), *train_trajectories)
-        (obs, a, r, _, _, log_prob) = train_trajectories
+        (obs, a, r, _, _, log_prob, og_r0) = train_trajectories
         W = v_fit(featmat, r)[0]
         adv = self.adv_fcn(W, obs, r)
         train_trajectories = (obs, a, adv, log_prob)
-        r0 = r # metrics
         
         # compute gradient + step
         inner_params_p = self.reinforce_step(train_trajectories[:-1], p_params, alpha)
@@ -313,12 +312,12 @@ class Worker:
         test_trajectories = self.n_rollouts(inner_params_p, rng, eval_n_traj)
         featmat = np.concatenate([v_features(traj[0]) for traj in test_trajectories])
         test_trajectories = jax.tree_multimap(lambda *x: np.concatenate(x, 0), *test_trajectories)
-        (obs, a, r, _, _, log_prob) = test_trajectories
+        (obs, a, r, _, _, log_prob, og_r1) = test_trajectories
         Wtest = v_fit(featmat, r)[0]
         adv = self.adv_fcn(Wtest, obs, r)
         test_trajectories = (obs, a, adv, log_prob)
 
-        return (train_trajectories, test_trajectories), (r0.sum().item(), r.sum().item())
+        return (train_trajectories, test_trajectories), (og_r0.sum().item(), og_r1.sum().item())
 
     def maml_outter(self, p_params, inner, alpha):
         train_trajectories, test_trajectories = inner
@@ -354,39 +353,41 @@ def maml_eval(env, p_params, rng, n_steps=1):
     return rewards
 
 #%%
-env.seed(0)
-n_tasks = 2
-task = env.sample_tasks(1)[0] ## only two tasks
-assert n_tasks in [1, 2] 
-if n_tasks == 1: 
-    tasks = [task] * task_batch_size
-elif n_tasks == 2: 
-    task2 = {'goal': -task['goal'].copy()}
-    tasks = [task, task2] * (task_batch_size//2)
+# env.seed(0)
+# n_tasks = 2
+# task = env.sample_tasks(1)[0] ## only two tasks
+# assert n_tasks in [1, 2] 
+# if n_tasks == 1: 
+#     tasks = [task] * task_batch_size
+# elif n_tasks == 2: 
+#     task2 = {'goal': -task['goal'].copy()}
+#     tasks = [task, task2] * (task_batch_size//2)
 
-for task in tasks[:n_tasks]: 
-    env.reset_task(task)
-    # log max reward 
-    goal = env._task['goal']
-    reward = 0 
-    step_count = 0 
-    obs = env.reset()
-    while True: 
-        a = goal - obs 
-        obs2, r, done, _ = env.step(a)
-        reward += r
-        step_count += 1 
-        if done: break 
-        obs = obs2
-    print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
+# for task in tasks[:n_tasks]: 
+#     env.reset_task(task)
+#     # log max reward 
+#     goal = env._task['goal']
+#     reward = 0 
+#     step_count = 0 
+#     obs = env.reset()
+#     while True: 
+#         a = goal - obs 
+#         obs2, r, done, _ = env.step(a)
+#         reward += r
+#         step_count += 1 
+#         if done: break 
+#         obs = obs2
+#     print(f'[LOGGER]: MAX_REWARD={reward} IN {step_count} STEPS')
 
 #%%
 from torch.utils.tensorboard import SummaryWriter
-writer = SummaryWriter(comment=f'maml4_{n_tasks}task_test_seed={seed}')
+writer = SummaryWriter(comment=f'maml4_{task_batch_size}task_test_seed={seed}')
 
 #%%
 step_count = 0 
 for e in tqdm(range(1, epochs+1)):
+    # sample tasks 
+    tasks = env.sample_tasks(task_batch_size)
 
     n_envs = len(tasks)
     workers = [Worker.remote(tasks[i]) for i in range(n_envs)]
@@ -397,34 +398,30 @@ for e in tqdm(range(1, epochs+1)):
     r1s = [o[0][1] for o in output]
     grads = [o[1] for o in output]
 
-    for i in range(n_tasks):
-        writer.add_scalar(f'train_task{i}/reward_0step', r0s[i], e)
-        writer.add_scalar(f'train_task{i}/reward_1step', r1s[i], e)
-
     writer.add_scalar(f'train_mean_task/reward_0step', onp.mean(r0s), e)
     writer.add_scalar(f'train_mean_task/reward_1step', onp.mean(r1s), e)
 
     grads = jax.tree_multimap(lambda *g: np.stack(g, 0).mean(0), *grads)
     p_params, p_opt_state = p_update_fcn(p_params, p_opt_state, grads)
 
-    if e % eval_every == 0:
-        eval_tasks = tasks[:n_tasks]
-        task_rewards = []
-        for task_i, eval_task in enumerate(eval_tasks):
-            env.reset_task(eval_task)
+    # if e % eval_every == 0:
+    #     eval_tasks = tasks[:n_tasks]
+    #     task_rewards = []
+    #     for task_i, eval_task in enumerate(eval_tasks):
+    #         env.reset_task(eval_task)
 
-            rng, subkey = jax.random.split(rng, 2)
-            rewards = maml_eval(env, p_params, subkey, n_steps=3)
-            task_rewards.append(rewards)
+    #         rng, subkey = jax.random.split(rng, 2)
+    #         rewards = maml_eval(env, p_params, subkey, n_steps=3)
+    #         task_rewards.append(rewards)
 
-            for step_i, r in enumerate(rewards):
-                writer.add_scalar(f'task{task_i}/reward_{step_i}step', r, e)
+    #         for step_i, r in enumerate(rewards):
+    #             writer.add_scalar(f'task{task_i}/reward_{step_i}step', r, e)
 
-        mean_rewards=[]
-        for step_i in range(len(task_rewards[0])):
-            mean_r = sum([task_rewards[j][step_i] for j in range(len(task_rewards))]) / 2
-            writer.add_scalar(f'mean_task/reward_{step_i}step', mean_r, e)
-            mean_rewards.append(mean_r)
+    #     mean_rewards=[]
+    #     for step_i in range(len(task_rewards[0])):
+    #         mean_r = sum([task_rewards[j][step_i] for j in range(len(task_rewards))]) / 2
+    #         writer.add_scalar(f'mean_task/reward_{step_i}step', mean_r, e)
+    #         mean_rewards.append(mean_r)
 
 #%%
 #%%
